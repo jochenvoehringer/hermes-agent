@@ -733,6 +733,7 @@ def _(rid, params: dict) -> dict:
                 {
                     "session_id": sid,
                     "resumed": target,
+                    "required_prompt_handler": required_prompt_handler,
                     "message_count": len(display_history) if omit_messages else len(messages),
                     "messages": messages,
                     "messages_omitted": omit_messages,
@@ -796,6 +797,7 @@ def _(rid, params: dict) -> dict:
                 {
                     "session_id": sid,
                     "resumed": target,
+                    "required_prompt_handler": required_prompt_handler,
                     "message_count": record["resume_message_count"],
                     "messages": [],
                     "hydrating": True,
@@ -989,7 +991,13 @@ def _(rid, params: dict) -> dict:
                     pass
                 if lease is not None:
                     lease.release()
-                return _reuse_live_response(*live)
+                other_sid, other_session = live
+                if _sessions.get(other_sid) is not other_session:
+                    return _err(rid, 4007, "session no longer live; retry resume")
+                if other_session.get("_client_gone_interrupt_requested"):
+                    return _err(rid, 4009, "session disconnect interrupt settling")
+                _cancel_ws_orphan_reap(other_sid)
+                return _ok(rid, _reuse_live_payload(other_sid, other_session))
             try:
                 init_home_token = (
                     set_hermes_home_override(str(profile_home))
@@ -1097,6 +1105,7 @@ def _(rid, params: dict) -> dict:
     payload = {
         "session_id": sid,
         "resumed": target,
+        "required_prompt_handler": required_prompt_handler,
         "message_count": len(raw_history) if omit_messages else len(messages),
         "messages": messages,
         "messages_omitted": omit_messages,
