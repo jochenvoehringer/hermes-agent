@@ -78,6 +78,7 @@ def _isolated_ocr_probe(frame: dict, result_queue) -> None:
     host = ChildComputeHost(stdout=io.StringIO(), heartbeat_secs=0)
     try:
         child_session = host._ensure_server_session(fake_server, frame)
+        initial_handler = child_session.get("required_prompt_handler")
         child_server._sessions = {frame["sid"]: child_session}
         child_server._emit = (
             lambda name, sid, payload=None: events.append((name, sid, payload))
@@ -131,7 +132,7 @@ def _isolated_ocr_probe(frame: dict, result_queue) -> None:
 
         result_queue.put(
             {
-                "initial_handler": frame.get("required_prompt_handler"),
+                "initial_handler": initial_handler,
                 "cleared_handler": cleared_handler,
                 "reasserted_handler": reasserted.get("required_prompt_handler"),
                 "clear_action": clear_decision.action,
@@ -289,6 +290,7 @@ def _register_turn(host: ComputeHost, fn, sid: str = "s1") -> None:
 def test_compute_host_refreshes_and_clears_handler_on_existing_child_session():
     child_session = {
         "required_prompt_handler": None,
+        "app_chat_id": None,
         "history_lock": threading.Lock(),
     }
     fake_server = SimpleNamespace(_sessions={"ios-ui": child_session})
@@ -299,15 +301,22 @@ def test_compute_host_refreshes_and_clears_handler_on_existing_child_session():
             {
                 "sid": "ios-ui",
                 "required_prompt_handler": "hoppe_ocr_approval",
+                "app_chat_id": "app-root",
             },
         )
         assert first["required_prompt_handler"] == "hoppe_ocr_approval"
+        assert first["app_chat_id"] == "app-root"
 
         second = host._ensure_server_session(
             fake_server,
-            {"sid": "ios-ui", "required_prompt_handler": None},
+            {
+                "sid": "ios-ui",
+                "required_prompt_handler": None,
+                "app_chat_id": None,
+            },
         )
         assert second["required_prompt_handler"] is None
+        assert second["app_chat_id"] is None
     finally:
         host.close()
 
@@ -391,6 +400,7 @@ def test_compute_host_new_child_session_retains_required_handler(init_fails):
                 "sid": "ios-ui",
                 "session_key": "stored-ios",
                 "required_prompt_handler": "hoppe_ocr_approval",
+                "app_chat_id": "app-root",
                 "attached_images": ["/tmp/protected.png"],
                 "source": "ios",
             },
@@ -399,6 +409,7 @@ def test_compute_host_new_child_session_retains_required_handler(init_fails):
         host.close()
 
     assert session["required_prompt_handler"] == "hoppe_ocr_approval"
+    assert session["app_chat_id"] == "app-root"
     if not init_fails:
         assert init_calls[0]["required_prompt_handler"] == "hoppe_ocr_approval"
 
