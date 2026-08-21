@@ -476,6 +476,16 @@ def _(rid, params: dict) -> dict:
             profile_home
         )
 
+        def _subscribe_ios_runtime(runtime_id: str) -> None:
+            transport = current_transport()
+            if found.get("source") != "ios" or transport is None:
+                return
+            try:
+                app_chat_id, _tip, _lineage = db.get_compression_conversation(target)
+                _session_subscribers.subscribe(app_chat_id, runtime_id, transport)
+            except Exception:
+                logger.debug("iOS session subscriber registration failed", exc_info=True)
+
         def _reuse_live_payload(sid: str, session: dict) -> dict:
             # The handler policy is transport/client-owned rather than durable
             # conversation state. Reconnects reassert (or clear) it before the
@@ -490,6 +500,7 @@ def _(rid, params: dict) -> dict:
                 omit_messages=omit_messages,
             )
             payload["resumed"] = target
+            _subscribe_ios_runtime(str(payload.get("session_key") or target))
             if defer_history:
                 payload["messages"] = []
                 payload["message_count"] = int(
@@ -624,6 +635,7 @@ def _(rid, params: dict) -> dict:
             if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
                 return _ok(rid, _reuse_live_payload(*live))
 
+            _subscribe_ios_runtime(target)
             _schedule_resume_hydration(sid, target, db, close_db=owns_db)
             # The hydration worker now owns a profile-scoped handle and closes it
             # after the transcript read. The shared launch DB is process-owned.
@@ -744,6 +756,7 @@ def _(rid, params: dict) -> dict:
             }
             if auto_continue is not None:
                 payload["auto_continue"] = auto_continue
+            _subscribe_ios_runtime(target)
             return _ok(rid, payload)
 
         # Build the agent OUTSIDE the lock — _make_agent can block for seconds
@@ -950,6 +963,7 @@ def _(rid, params: dict) -> dict:
     }
     if auto_continue is not None:
         payload["auto_continue"] = auto_continue
+    _subscribe_ios_runtime(target)
     return _ok(rid, payload)
 
 

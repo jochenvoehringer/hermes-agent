@@ -430,6 +430,7 @@ async def handle_ws(ws: Any) -> None:
         reaped_sessions = 0
         detached_sessions = 0
         if transport is not None:
+            server._session_subscribers.unsubscribe_transport(transport)
             server.unregister_live_transport(transport)
             transport.close()
 

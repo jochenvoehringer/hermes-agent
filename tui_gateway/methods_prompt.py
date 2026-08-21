@@ -347,6 +347,8 @@ def _(rid, params: dict) -> dict:
         busy_transport = None
         with session["history_lock"]:
             if session.get("running"):
+                if is_truthy_value(params.get("reject_if_busy", False)):
+                    return _err(rid, 4094, "chat_busy")
                 # Don't reject a mid-turn prompt — queue it (and, by default,
                 # interrupt the live turn) so it runs as the next turn. The
                 # provider interrupt itself must happen after this lock is

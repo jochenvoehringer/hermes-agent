@@ -4386,6 +4386,62 @@ def _session(agent=None, **extra):
     }
 
 
+def test_prompt_submit_reject_if_busy_does_not_queue_or_interrupt(monkeypatch):
+    class _Agent:
+        def __init__(self):
+            self.interrupt_calls = 0
+
+        def interrupt(self):
+            self.interrupt_calls += 1
+
+    class _DeferredThread:
+        def __init__(self, target=None, **_kwargs):
+            self.target = target
+
+        def start(self):
+            return None
+
+    agent = _Agent()
+    session = _session(agent=agent)
+    server._sessions["busy-refusal"] = session
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_args: None)
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda _session: None)
+    monkeypatch.setattr(server, "_persist_branch_seed", lambda _session: None)
+    monkeypatch.setattr(server.threading, "Thread", _DeferredThread)
+
+    try:
+        first = server.handle_request(
+            {
+                "id": "first",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "busy-refusal",
+                    "text": "first",
+                    "reject_if_busy": True,
+                },
+            }
+        )
+        second = server.handle_request(
+            {
+                "id": "second",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "busy-refusal",
+                    "text": "second",
+                    "reject_if_busy": True,
+                },
+            }
+        )
+
+        assert first["result"]["status"] == "streaming"
+        assert second["error"] == {"code": 4094, "message": "chat_busy"}
+        assert "queued_prompt" not in session
+        assert session.get("_turn_cancel_requested") is False
+        assert agent.interrupt_calls == 0
+    finally:
+        server._sessions.pop("busy-refusal", None)
+
+
 def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
     calls = {"hooks": []}
 

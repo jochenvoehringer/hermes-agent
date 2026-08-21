@@ -106,6 +106,25 @@ def test_ws_connection_registers_then_disconnect_unregisters_live_transport(monk
         server._live_transports.clear()
 
 
+def test_ws_disconnect_unsubscribes_transport_before_session_teardown(monkeypatch):
+    calls = []
+
+    class _Hub:
+        def unsubscribe_transport(self, transport):
+            calls.append(("unsubscribe", transport))
+
+    monkeypatch.setattr(server, "_session_subscribers", _Hub())
+    monkeypatch.setattr(
+        server,
+        "_close_sessions_for_transport",
+        lambda transport, **_kwargs: calls.append(("close_sessions", transport)) or (0, 0),
+    )
+
+    _run_disconnect(monkeypatch, lambda _transport: None)
+
+    assert [name for name, _transport in calls] == ["unsubscribe", "close_sessions"]
+
+
 def test_ws_disconnect_releases_wake_word_owner(monkeypatch):
     released = []
     created = []
@@ -226,5 +245,4 @@ def test_ws_transport_preserves_cross_batch_order():
         assert entered == ["A1", "A2", "B1", "B2"]
 
     asyncio.run(scenario())
-
 
