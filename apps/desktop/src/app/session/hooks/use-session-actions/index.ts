@@ -1793,12 +1793,15 @@ export function useSessionActions({
                 !(session._lineage_root_id && deletedSet.has(session._lineage_root_id))
             )
         )
+
         tombstoneSessions(deletedIds)
         // A deleted session's cached tail must not resurrect on a recycled id.
+
         for (const deletedId of deletedIds) {
           dropTranscriptTail(deletedId)
           clearQueuedPrompts(deletedId)
         }
+
         // Only after the RPC lands — the optimistic eviction above can roll
         // back, and a rolled-back row must keep its watermark/marker.
         forgetSessionUnread(deletedIds, removed?.profile)

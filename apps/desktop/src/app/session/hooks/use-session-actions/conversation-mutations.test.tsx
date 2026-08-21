@@ -53,6 +53,7 @@ type Handle = Pick<ReturnType<typeof useSessionActions>, 'archiveSession' | 'rem
 
 function Harness({ onReady }: { onReady: (handle: Handle) => void }) {
   const ref = <T,>(value: T): MutableRefObject<T> => ({ current: value })
+
   const actions = useSessionActions({
     activeSessionId: null,
     activeSessionIdRef: ref<string | null>(null),
@@ -81,8 +82,10 @@ function Harness({ onReady }: { onReady: (handle: Handle) => void }) {
 
 async function mountHarness(): Promise<Handle> {
   let handle: Handle | undefined
+
   render(<Harness onReady={value => (handle = value)} />)
   await waitFor(() => expect(handle).toBeDefined())
+
   return handle as Handle
 }
 

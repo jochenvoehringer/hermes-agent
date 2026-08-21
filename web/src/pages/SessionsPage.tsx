@@ -36,12 +36,16 @@ import { api } from "@/lib/api";
 import { formatSessionPruneResult } from "@/lib/session-prune";
 import { shouldRefreshSessions } from "@/lib/session-refresh";
 import {
+  conversationDeleteIds,
+  conversationDeleteRowCount,
+  conversationDeleteVisibleCount,
+  evictDeletedSessions,
+} from "@/lib/session-conversation-delete";
+import {
   importSummary,
   parseImportSessions,
 } from "@/lib/session-import";
 import type {
-  BulkSessionDeleteResponse,
-  SessionDeleteResponse,
   SessionInfo,
   SessionMessage,
   SessionSearchResult,
@@ -110,46 +114,6 @@ const AUTOMATION_SESSION_SOURCES = [
 ];
 const AUTOMATION_SESSION_SOURCE_SET = new Set(AUTOMATION_SESSION_SOURCES);
 const NO_MATCHING_SESSION_SOURCE = "__hermes_dashboard_no_matching_source__";
-
-type ConversationDeleteResponse =
-  | BulkSessionDeleteResponse
-  | SessionDeleteResponse;
-
-export function conversationDeleteIds(
-  response: ConversationDeleteResponse,
-  requestedIds: string[],
-): string[] {
-  const returnedIds = response.deleted_ids;
-  const source =
-    Array.isArray(returnedIds) && returnedIds.length > 0
-      ? returnedIds
-      : requestedIds;
-  return [...new Set(source.filter((id) => typeof id === "string" && id))];
-}
-
-export function conversationDeleteRowCount(
-  response: ConversationDeleteResponse,
-  deletedIds: string[],
-): number {
-  if ("deleted_rows" in response && typeof response.deleted_rows === "number") {
-    return response.deleted_rows;
-  }
-  if ("deleted_count" in response && typeof response.deleted_count === "number") {
-    return response.deleted_count;
-  }
-  if ("deleted" in response && typeof response.deleted === "number") {
-    return response.deleted;
-  }
-  return deletedIds.length;
-}
-
-export function evictDeletedSessions(
-  sessions: SessionInfo[],
-  deletedIds: string[],
-): SessionInfo[] {
-  const deleted = new Set(deletedIds);
-  return sessions.filter((session) => !deleted.has(session.id));
-}
 
 type SessionFilterCategory = "chats" | "automation" | "all";
 type SourceSelectionsByCategory = Record<SessionFilterCategory, string[] | null>;
@@ -1323,10 +1287,10 @@ export default function SessionsPage() {
           const response = await api.deleteSession(id);
           const deletedIds = conversationDeleteIds(response, [id]);
           const deletedSet = new Set(deletedIds);
-          const deletedRows = conversationDeleteRowCount(response, deletedIds);
+          const deletedVisible = conversationDeleteVisibleCount(response, [id]);
           setSessions((prev) => evictDeletedSessions(prev, deletedIds));
           setOverviewSessions((prev) => evictDeletedSessions(prev, deletedIds));
-          setTotal((prev) => Math.max(0, prev - deletedRows));
+          setTotal((prev) => Math.max(0, prev - deletedVisible));
           if (expandedId && deletedSet.has(expandedId)) setExpandedId(null);
           // Drop the deleted ID from any active bulk-select set — it
           // can't bulk-delete a row that's already gone.
@@ -1422,6 +1386,7 @@ export default function SessionsPage() {
       const resp = await api.bulkDeleteSessions(ids);
       const deletedIds = conversationDeleteIds(resp, ids);
       const deletedRows = conversationDeleteRowCount(resp, deletedIds);
+      const deletedVisible = conversationDeleteVisibleCount(resp, ids);
       showToast(
         t.sessions.selectedSessionsDeleted.replace(
           "{count}",
@@ -1437,7 +1402,7 @@ export default function SessionsPage() {
       const deletedSet = new Set(deletedIds);
       setSessions((prev) => evictDeletedSessions(prev, deletedIds));
       setOverviewSessions((prev) => evictDeletedSessions(prev, deletedIds));
-      setTotal((prev) => Math.max(0, prev - deletedRows));
+      setTotal((prev) => Math.max(0, prev - deletedVisible));
       if (expandedId && deletedSet.has(expandedId)) setExpandedId(null);
       clearSelection();
       loadSessions(page);
