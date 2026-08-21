@@ -12186,6 +12186,20 @@ _AUTO_ARCHIVE_CHECK_INTERVAL_S = 300.0
 _last_auto_archive_check: Dict[str, float] = {}
 
 
+def _validated_auto_archive_exclude_sources(
+    sessions_cfg: Dict[str, Any],
+) -> Tuple[str, ...]:
+    value = sessions_cfg.get("auto_archive_exclude_sources", [])
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise ValueError(
+            "sessions.auto_archive_exclude_sources must be a list of "
+            "non-empty strings"
+        )
+    return tuple(item.strip() for item in value)
+
+
 def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
     """Run the config-gated stale-session auto-archive for ``profile``.
 
@@ -12204,14 +12218,30 @@ def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
         _last_auto_archive_check[key] = now
 
         from hermes_cli.config import load_config as _load_full_config
-        cfg = (_load_full_config().get("sessions") or {})
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        target_home = (
+            _cron_profile_home(profile)[1]
+            if profile
+            else get_process_hermes_home()
+        )
+        token = set_hermes_home_override(str(target_home))
+        try:
+            cfg = (_load_full_config().get("sessions") or {})
+        finally:
+            reset_hermes_home_override(token)
         if not cfg.get("auto_archive", False):
             return
+        exclude_sources = _validated_auto_archive_exclude_sources(cfg)
         db = _open_session_db_for_profile(profile, read_only=False)
         try:
             db.maybe_auto_archive(
                 idle_days=float(cfg.get("auto_archive_days", 3)),
                 min_interval_hours=int(cfg.get("min_interval_hours", 24)),
+                exclude_sources=exclude_sources,
             )
         finally:
             db.close()

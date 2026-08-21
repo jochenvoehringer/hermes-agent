@@ -32,6 +32,7 @@ import time
 import weakref
 from collections import deque
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
@@ -46,7 +47,18 @@ from hermes_constants import get_hermes_home
 from hermes_cli.sqlite_runtime import (
     is_sqlite_wal_reset_vulnerable as _is_sqlite_wal_reset_vulnerable,
 )
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
+from typing import (
+    Any,
+    Callable,
+    Collection,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    TypeVar,
+)
 
 from hermes_state_common import (  # noqa: F401  (re-exported for back-compat)
     _BRANCH_CHILD_SQL,
@@ -3060,6 +3072,36 @@ SESSION_STATUS_EMPTY = "empty"
 # finish_reason values that mark the turn as having ended in a provider or
 # agent error (vs. a normal 'stop'/'length'/'tool_calls' completion).
 _ERROR_FINISH_REASONS = frozenset({"error", "agent_error", "content_filter"})
+
+
+@dataclass(frozen=True)
+class ConversationDeletePreview:
+    app_chat_id: str
+    session_id: str
+    title: str
+    message_count: int
+    latest_message_row_id: int
+    delete_ids: Tuple[str, ...]
+    revision: str
+
+
+class ConversationDeleteConflict(RuntimeError):
+    pass
+
+
+def _conversation_revision(
+    delete_ids: Iterable[str], message_count: int, latest_message_row_id: int
+) -> str:
+    canonical = json.dumps(
+        {
+            "delete_ids": sorted(delete_ids),
+            "message_count": int(message_count),
+            "latest_message_row_id": int(latest_message_row_id),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def classify_session_status(
@@ -8245,38 +8287,16 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         displayed tip lets the still-unarchived root resurrect it on refresh.
         Returns True when at least one row was updated.
         """
+        lineage = self.get_compression_lineage(session_id)
+        if not lineage:
+            return False
+
         def _do(conn):
+            placeholders = ",".join("?" * len(lineage))
             cursor = conn.execute(
-                """
-                WITH RECURSIVE
-                  ancestors(id) AS (
-                    SELECT ?
-                    UNION
-                    SELECT parent.id
-                    FROM ancestors a
-                    JOIN sessions child ON child.id = a.id
-                    JOIN sessions parent ON parent.id = child.parent_session_id
-                    WHERE parent.end_reason = 'compression'
-                  ),
-                  descendants(id) AS (
-                    SELECT ?
-                    UNION
-                    SELECT child.id
-                    FROM descendants d
-                    JOIN sessions parent ON parent.id = d.id
-                    JOIN sessions child ON child.parent_session_id = parent.id
-                    WHERE parent.end_reason = 'compression'
-                  ),
-                  lineage(id) AS (
-                    SELECT id FROM ancestors
-                    UNION
-                    SELECT id FROM descendants
-                  )
-                UPDATE sessions
-                SET archived = ?
-                WHERE id IN (SELECT id FROM lineage)
-                """,
-                (session_id, session_id, 1 if archived else 0),
+                f"UPDATE sessions SET archived = ? "
+                f"WHERE id IN ({placeholders})",
+                (1 if archived else 0, *lineage),
             )
             rowcount = cursor.rowcount
             if rowcount is None or rowcount < 0:
@@ -11287,15 +11307,35 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
     def get_compression_lineage(self, session_id: str) -> List[str]:
         """Return compression ancestors through tip in chronological order."""
-        session = self.get_session(session_id)
+        with self._read_ctx() as conn:
+            return self._get_compression_lineage_on_conn(conn, session_id)
+
+    def _get_compression_lineage_on_conn(
+        self, conn: sqlite3.Connection, session_id: str
+    ) -> List[str]:
+        """Transaction-local form of :meth:`get_compression_lineage`."""
+
+        def _row(sid: str) -> Optional[Dict[str, Any]]:
+            found = conn.execute(
+                "SELECT * FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+            return dict(found) if found else None
+
+        session = _row(session_id)
         if not session or self._is_explicit_fork_child_row(session):
             return [session_id] if session else []
 
         root = session
         ancestors = {root["id"]}
-        while self._is_compression_child_row(root):
-            parent = self.get_session(root["parent_session_id"])
-            if not parent or parent["id"] in ancestors:
+        while root.get("parent_session_id"):
+            if self._is_explicit_fork_child_row(root):
+                break
+            parent = _row(root["parent_session_id"])
+            if (
+                not parent
+                or parent["id"] in ancestors
+                or parent.get("end_reason") != "compression"
+            ):
                 break
             root = parent
             ancestors.add(root["id"])
@@ -11304,19 +11344,15 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         seen = {root["id"]}
         current = root
         while current.get("end_reason") == "compression":
-            with self._lock:
-                rows = self._conn.execute(
-                    """
-                    SELECT * FROM sessions
-                    WHERE parent_session_id = ?
-                    ORDER BY started_at ASC
-                    """,
-                    (current["id"],),
-                ).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE parent_session_id = ? "
+                "ORDER BY started_at ASC",
+                (current["id"],),
+            ).fetchall()
             next_child = None
             for row in rows:
                 candidate = dict(row)
-                if self._is_compression_child_row(candidate):
+                if not self._is_explicit_fork_child_row(candidate):
                     next_child = candidate
                     break
             if not next_child or next_child["id"] in seen:
@@ -11324,11 +11360,104 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             lineage.append(next_child["id"])
             seen.add(next_child["id"])
             current = next_child
-            if current["id"] == session_id:
-                # Continue to include later compression tips only when the
-                # requested session itself was compacted.
-                continue
         return lineage if session_id in lineage else [session_id]
+
+    def get_compression_conversation(
+        self, session_id: str
+    ) -> Tuple[str, str, List[str]]:
+        """Return ``(app_chat_id, resumable_tip, compression_lineage)``.
+
+        This is the canonical user-visible conversation identity: unlike
+        :meth:`get_conversation_root`, it follows compression edges only and
+        never folds explicit branches or delegated tool runs into their parent.
+        """
+        lineage = self.get_compression_lineage(session_id)
+        if not lineage:
+            return session_id, session_id, []
+        app_chat_id = lineage[0]
+        resumable_tip = self.resolve_resume_session_id(lineage[-1])
+        return app_chat_id, resumable_tip, lineage
+
+    def set_conversation_title(self, app_chat_id: str, title: str) -> bool:
+        """Set a user-authoritative title on the conversation's resumable tip."""
+        _root, session_id, _lineage = self.get_compression_conversation(
+            app_chat_id
+        )
+        return self.set_session_title(session_id, title)
+
+    def _conversation_delete_preview_on_conn(
+        self, conn: sqlite3.Connection, app_chat_id: str
+    ) -> ConversationDeletePreview:
+        lineage = self._get_compression_lineage_on_conn(conn, app_chat_id)
+        if not lineage:
+            raise ValueError(f"conversation not found: {app_chat_id}")
+        canonical_id = lineage[0]
+        session_id = lineage[-1]
+        delegate_ids = sorted(_collect_delegate_child_ids(conn, lineage))
+        delete_ids = tuple([*lineage, *delegate_ids])
+        placeholders = ",".join("?" * len(delete_ids))
+        message_row = conn.execute(
+            f"SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS latest_id "
+            f"FROM messages WHERE session_id IN ({placeholders})",
+            delete_ids,
+        ).fetchone()
+        title_row = conn.execute(
+            "SELECT COALESCE(title, '') AS title FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        message_count = int(message_row["count"])
+        latest_message_row_id = int(message_row["latest_id"])
+        return ConversationDeletePreview(
+            app_chat_id=canonical_id,
+            session_id=session_id,
+            title=str(title_row["title"] if title_row else ""),
+            message_count=message_count,
+            latest_message_row_id=latest_message_row_id,
+            delete_ids=delete_ids,
+            revision=_conversation_revision(
+                delete_ids, message_count, latest_message_row_id
+            ),
+        )
+
+    def preview_conversation_delete(
+        self, app_chat_id: str
+    ) -> ConversationDeletePreview:
+        """Describe the complete compression-lineage delete scope."""
+        with self._read_ctx() as conn:
+            return self._conversation_delete_preview_on_conn(conn, app_chat_id)
+
+    def delete_conversation(
+        self,
+        app_chat_id: str,
+        revision: str,
+        sessions_dir: Optional[Path] = None,
+    ) -> bool:
+        """Delete a conversation when its preview revision is still current."""
+        removed_ids: List[str] = []
+
+        def _do(conn):
+            preview = self._conversation_delete_preview_on_conn(conn, app_chat_id)
+            if preview.revision != revision:
+                raise ConversationDeleteConflict(
+                    f"conversation changed since preview: {app_chat_id}"
+                )
+            count, deleted_ids = self._delete_sessions_on_conn(
+                conn,
+                list(preview.delete_ids),
+                expected_delete_ids=preview.delete_ids,
+            )
+            if set(deleted_ids) != set(preview.delete_ids):
+                raise ConversationDeleteConflict(
+                    f"conversation delete scope changed: {app_chat_id}"
+                )
+            removed_ids.extend(deleted_ids)
+            return count > 0
+
+        deleted = self._execute_write(_do)
+        if deleted:
+            for session_id in removed_ids:
+                self._remove_session_files(sessions_dir, session_id)
+        return bool(deleted)
 
     def clear_messages(self, session_id: str) -> None:
         """Delete all messages for a session and reset its counters."""
@@ -11489,10 +11618,60 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             self._remove_session_files(sessions_dir, session_id)
         return bool(deleted)
 
+    def _delete_sessions_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        session_ids: Iterable[str],
+        *,
+        expected_delete_ids: Optional[Iterable[str]] = None,
+    ) -> Tuple[int, List[str]]:
+        """Delete a target set using an already-open write transaction."""
+        unique_ids = sorted(
+            {sid for sid in session_ids if isinstance(sid, str) and sid}
+        )
+        if not unique_ids:
+            return 0, []
+
+        placeholders = ",".join("?" * len(unique_ids))
+        rows = conn.execute(
+            f"SELECT id FROM sessions WHERE id IN ({placeholders})",
+            unique_ids,
+        ).fetchall()
+        existing = [row["id"] for row in rows]
+        if not existing:
+            return 0, []
+
+        delegate_ids = sorted(_collect_delegate_child_ids(conn, existing))
+        actual_delete_ids = set(existing) | set(delegate_ids)
+        if (
+            expected_delete_ids is not None
+            and actual_delete_ids != set(expected_delete_ids)
+        ):
+            return 0, []
+
+        removed_delegate_ids = _delete_delegate_children(conn, existing)
+        existing_placeholders = ",".join("?" * len(existing))
+        conn.execute(
+            f"UPDATE sessions SET parent_session_id = NULL "
+            f"WHERE parent_session_id IN ({existing_placeholders})",
+            existing,
+        )
+        conn.execute(
+            f"DELETE FROM messages WHERE session_id IN ({existing_placeholders})",
+            existing,
+        )
+        conn.execute(
+            f"DELETE FROM sessions WHERE id IN ({existing_placeholders})",
+            existing,
+        )
+        self._delete_unreferenced_system_prompts(conn)
+        return len(existing), [*existing, *removed_delegate_ids]
+
     def delete_sessions(
         self,
         session_ids: List[str],
         sessions_dir: Optional[Path] = None,
+        expected_delete_ids: Optional[Iterable[str]] = None,
     ) -> int:
         """Delete every session in *session_ids* in a single transaction.
 
@@ -11513,62 +11692,26 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
           outside the DB transaction when *sessions_dir* is provided,
           matching :meth:`prune_sessions` and
           :meth:`delete_empty_sessions`.
+        * When *expected_delete_ids* is provided, the parent targets plus
+          their recursive delegate cascade must still match that exact set;
+          otherwise the transaction is a no-op.
 
         Returns the count of sessions that actually existed and were
         deleted (may be less than ``len(session_ids)`` if some IDs were
         already gone).
         """
-        if not session_ids:
-            return 0
-        # Dedup + drop any non-string entries up-front. Avoids
-        # double-counting in the WHERE-IN list and protects against
-        # callers that pass a list with stray ``None`` values.
-        unique_ids = list({sid for sid in session_ids if isinstance(sid, str) and sid})
-        if not unique_ids:
-            return 0
-
-        removed_ids: list[str] = []
-        removed_delegate_ids: list[str] = []
+        removed_ids: List[str] = []
 
         def _do(conn):
-            placeholders = ",".join("?" * len(unique_ids))
-            # First, filter to IDs that actually exist — we want to
-            # return the real deleted count, not the input length.
-            cursor = conn.execute(
-                f"SELECT id FROM sessions WHERE id IN ({placeholders})",
-                unique_ids,
+            count, deleted_ids = self._delete_sessions_on_conn(
+                conn,
+                session_ids,
+                expected_delete_ids=expected_delete_ids,
             )
-            existing = [row["id"] for row in cursor.fetchall()]
-            if not existing:
-                return 0
-
-            existing_placeholders = ",".join("?" * len(existing))
-            removed_delegate_ids.extend(_delete_delegate_children(conn, existing))
-            # Orphan remaining children whose parent is in the kill list so the
-            # FK constraint stays satisfied. Pin children whose parent
-            # is itself in the kill list rather than NULL-ing parents
-            # of survivors — the IN list on ``parent_session_id`` does
-            # exactly this.
-            conn.execute(
-                f"UPDATE sessions SET parent_session_id = NULL "
-                f"WHERE parent_session_id IN ({existing_placeholders})",
-                existing,
-            )
-            conn.execute(
-                f"DELETE FROM messages WHERE session_id IN ({existing_placeholders})",
-                existing,
-            )
-            conn.execute(
-                f"DELETE FROM sessions WHERE id IN ({existing_placeholders})",
-                existing,
-            )
-            self._delete_unreferenced_system_prompts(conn)
-            removed_ids.extend(existing)
-            return len(existing)
+            removed_ids.extend(deleted_ids)
+            return count
 
         count = self._execute_write(_do)
-        for sid in removed_delegate_ids:
-            self._remove_session_files(sessions_dir, sid)
         for sid in removed_ids:
             self._remove_session_files(sessions_dir, sid)
         return count
@@ -11934,7 +12077,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         return len(rows)
 
     def archive_stale_sessions(
-        self, idle_days: float, *, exclude_pinned: bool = True
+        self,
+        idle_days: float,
+        *,
+        exclude_pinned: bool = True,
+        exclude_sources: Collection[str] = (),
     ) -> int:
         """Archive every session untouched for at least ``idle_days`` days.
 
@@ -11948,6 +12095,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         Guards:
           * ``pinned = 0`` when ``exclude_pinned`` (the Desktop "keep" flag).
+          * sources in ``exclude_sources`` are omitted with bound parameters.
           * ``archived = 0`` so repeat runs are idempotent no-ops.
           * only lineage *tips* / standalone rows are candidates
             (``end_reason <> 'compression'``); a stale tip archives its whole
@@ -11962,6 +12110,14 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             return 0
         cutoff = time.time() - float(idle_days) * 86400.0
         pin_clause = "AND s.pinned = 0" if exclude_pinned else ""
+        excluded = tuple(exclude_sources)
+        source_clause = ""
+        params: List[Any] = []
+        if excluded:
+            placeholders = ",".join("?" * len(excluded))
+            source_clause = f"AND s.source NOT IN ({placeholders})"
+            params.extend(excluded)
+        params.append(cutoff)
         with self._lock:
             rows = self._conn.execute(
                 f"""
@@ -11969,10 +12125,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 WHERE s.archived = 0
                   AND COALESCE(s.end_reason, '') <> 'compression'
                   {pin_clause}
+                  {source_clause}
                   AND {_sql_session_last_active("s")} < ?
                 ORDER BY s.started_at ASC
                 """,
-                (cutoff,),
+                params,
             ).fetchall()
         ids = [(r["id"] if isinstance(r, sqlite3.Row) else r[0]) for r in rows]
         for sid in ids:
@@ -12945,6 +13102,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         idle_days: float = 3,
         min_interval_hours: int = 24,
         exclude_pinned: bool = True,
+        exclude_sources: Collection[str] = (),
     ) -> Dict[str, Any]:
         """Idempotent auto-archive: soft-hide sessions idle for ``idle_days``.
 
@@ -12973,7 +13131,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     pass  # corrupt meta; treat as no prior run
 
             archived = self.archive_stale_sessions(
-                idle_days, exclude_pinned=exclude_pinned
+                idle_days,
+                exclude_pinned=exclude_pinned,
+                exclude_sources=exclude_sources,
             )
             result["archived"] = archived
 

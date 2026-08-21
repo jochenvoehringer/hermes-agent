@@ -11,10 +11,12 @@ lease was reclaimed cannot publish a stale compaction.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -312,3 +314,45 @@ class TestRotationPathWatermark:
         assert [m["content"] for m in child] == [
             SUMMARY[0]["content"], SUMMARY[1]["content"],
         ]
+
+    def test_rotation_child_inherits_agent_platform_source(self, tmp_path: Path) -> None:
+        db = SessionDB(tmp_path / "state.db")
+        db.create_session("ios-parent", source="cli")
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
+            from run_agent import AIAgent
+
+            agent = AIAgent(
+                api_key="test-key",
+                base_url="https://openrouter.ai/api/v1",
+                model="test/model",
+                platform="ios",
+                quiet_mode=True,
+                session_db=db,
+                session_id="ios-parent",
+                skip_context_files=True,
+                skip_memory=True,
+            )
+        agent.compression_in_place = False
+        compressor = MagicMock()
+        compressor.compress.return_value = [
+            {"role": "user", "content": "[CONTEXT COMPACTION] summary"},
+            {"role": "assistant", "content": "Continuing."},
+        ]
+        compressor.compression_count = 1
+        compressor.last_prompt_tokens = 0
+        compressor.last_completion_tokens = 0
+        compressor._last_summary_error = None
+        compressor._last_compress_aborted = False
+        compressor._last_summary_auth_failure = False
+        compressor._last_aux_model_failure_model = None
+        compressor._last_aux_model_failure_error = None
+        agent.context_compressor = compressor
+
+        agent._compress_context(
+            [{"role": "user", "content": "long input " * 200}],
+            "system",
+            approx_tokens=10_000,
+        )
+
+        assert agent.session_id != "ios-parent"
+        assert db.get_session(agent.session_id)["source"] == "ios"

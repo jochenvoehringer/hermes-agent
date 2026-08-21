@@ -352,7 +352,7 @@ class TestWebServerEndpoints:
 
         assert seen["thread"] != event_loop_thread
 
-    def test_get_sessions_auto_archive_uses_maintenance_writer(self):
+    def test_get_sessions_auto_archive_uses_default_profile_source_exclusions(self):
         from hermes_cli import web_server
         from hermes_cli.config import load_config, save_config
         from hermes_constants import get_hermes_home
@@ -361,11 +361,12 @@ class TestWebServerEndpoints:
         db_path = get_hermes_home() / "state.db"
         seed = SessionDB(db_path=db_path)
         try:
-            seed.create_session("stale", source="cli")
-            seed.create_session("fresh", source="cli")
+            seed.create_session("ios-stale", source="ios")
+            seed.create_session("desktop-stale", source="desktop")
+            seed.create_session("fresh", source="desktop")
             seed._conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?",
-                (time.time() - 30 * 86400, "stale"),
+                "UPDATE sessions SET started_at = ? WHERE id IN (?, ?)",
+                (time.time() - 30 * 86400, "ios-stale", "desktop-stale"),
             )
         finally:
             seed.close()
@@ -375,6 +376,7 @@ class TestWebServerEndpoints:
             {
                 "auto_archive": True,
                 "auto_archive_days": 3,
+                "auto_archive_exclude_sources": ["ios"],
                 "min_interval_hours": 0,
             }
         )
@@ -384,13 +386,87 @@ class TestWebServerEndpoints:
         response = self.client.get("/api/sessions?limit=50&offset=0")
 
         assert response.status_code == 200
-        assert [row["id"] for row in response.json()["sessions"]] == ["fresh"]
+        assert {row["id"] for row in response.json()["sessions"]} == {
+            "fresh",
+            "ios-stale",
+        }
         verify = SessionDB(db_path=db_path, read_only=True)
         try:
-            assert verify.get_session("stale")["archived"] == 1
+            assert verify.get_session("desktop-stale")["archived"] == 1
+            assert verify.get_session("ios-stale")["archived"] == 0
             assert verify.get_meta("last_auto_archive")
         finally:
             verify.close()
+
+    def test_auto_archive_loads_named_profile_config(self, tmp_path, monkeypatch):
+        from hermes_cli import web_server
+        from hermes_cli.config import load_config, save_config
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+        from hermes_state import SessionDB
+
+        profile_home = tmp_path / "router"
+        profile_home.mkdir()
+        token = set_hermes_home_override(str(profile_home))
+        try:
+            config = load_config()
+            config.setdefault("sessions", {}).update(
+                {
+                    "auto_archive": True,
+                    "auto_archive_days": 3,
+                    "auto_archive_exclude_sources": ["ios"],
+                    "min_interval_hours": 0,
+                }
+            )
+            save_config(config)
+        finally:
+            reset_hermes_home_override(token)
+
+        seed = SessionDB(profile_home / "state.db")
+        try:
+            seed.create_session("ios-stale", source="ios")
+            seed.create_session("desktop-stale", source="desktop")
+            seed._conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id IN (?, ?)",
+                (
+                    time.time() - 30 * 86400,
+                    "ios-stale",
+                    "desktop-stale",
+                ),
+            )
+            seed._conn.commit()
+        finally:
+            seed.close()
+
+        monkeypatch.setattr(
+            web_server,
+            "_cron_profile_home",
+            lambda profile: ("router", profile_home),
+        )
+        web_server._last_auto_archive_check.clear()
+
+        web_server._maybe_auto_archive_for_profile("router")
+
+        verify = SessionDB(profile_home / "state.db", read_only=True)
+        try:
+            assert verify.get_session("ios-stale")["archived"] == 0
+            assert verify.get_session("desktop-stale")["archived"] == 1
+        finally:
+            verify.close()
+
+    @pytest.mark.parametrize(
+        "value",
+        ["ios", ["ios", ""], ["ios", 7]],
+    )
+    def test_auto_archive_source_exclusions_require_non_empty_strings(self, value):
+        from hermes_cli import web_server
+
+        with pytest.raises(ValueError, match="non-empty strings"):
+            web_server._validated_auto_archive_exclude_sources(
+                {"auto_archive_exclude_sources": value}
+            )
 
     def test_get_sessions_fresh_store_returns_empty_list(self):
         response = self.client.get("/api/sessions?limit=50&offset=0")
