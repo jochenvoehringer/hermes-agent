@@ -393,6 +393,20 @@ def _(rid, params: dict) -> dict:
         # The incumbent turn completed before the busy handler could queue
         # this request. Re-enter the claim path instead of starting unlocked.
     try:
+        if session.get("_closing") or session.get("_hoppe_chat_deleted"):
+            return _err(rid, 4007, "session not found")
+        from tui_gateway.prompt_dispatch_hooks import normalize_required_prompt_handler
+
+        if "required_prompt_handler" in params:
+            claimed_required_prompt_handler = normalize_required_prompt_handler(
+                params.get("required_prompt_handler")
+            )
+            session["required_prompt_handler"] = claimed_required_prompt_handler
+        else:
+            claimed_required_prompt_handler = normalize_required_prompt_handler(
+                session.get("required_prompt_handler")
+            )
+        session["_turn_required_prompt_handler"] = claimed_required_prompt_handler
         # A watch session's run lives in the PARENT turn, so its own running
         # flag is False — without this, typing mid-run builds a second agent
         # racing the in-flight child on the same stored session (interleaved

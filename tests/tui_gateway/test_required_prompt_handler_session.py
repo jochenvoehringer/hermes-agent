@@ -1,6 +1,7 @@
 """Session propagation tests for the client-required pre-prompt handler."""
 
 import pytest
+import threading
 from types import SimpleNamespace
 
 from tui_gateway import server
@@ -212,6 +213,66 @@ def test_live_session_resume_reports_no_required_prompt_handler(monkeypatch, tmp
     )
 
     assert response["result"]["required_prompt_handler"] is None
+
+
+def test_live_resume_handler_refresh_uses_history_claim_lock(monkeypatch, tmp_path):
+    target = "stored-ios-live-lock"
+    _prepare_resume(monkeypatch, tmp_path, target)
+    record = server._deferred_session_record(
+        target, cols=80, cwd=str(tmp_path), history=[], lease=None,
+        source="ios", required_prompt_handler="hoppe_ocr_approval",
+    )
+    server._sessions["live-ios-ui"] = record
+    response = {}
+
+    class ObservedLock:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.attempted = threading.Event()
+        def acquire(self):
+            self.attempted.set()
+            return self.lock.acquire()
+        def release(self):
+            self.lock.release()
+        def __enter__(self):
+            self.acquire()
+            return self
+        def __exit__(self, *_args):
+            self.release()
+
+    observed = ObservedLock()
+    record["history_lock"] = observed
+    observed.lock.acquire()
+    worker = threading.Thread(target=lambda: response.update(
+        server._methods["session.resume"](
+            "desktop-clear",
+            {"session_id": target, "source": "ios", "profile": "router"},
+        )
+    ))
+    worker.start()
+    attempted = observed.attempted.wait(timeout=2)
+    try:
+        assert attempted and worker.is_alive()
+        assert record["required_prompt_handler"] == "hoppe_ocr_approval"
+    finally:
+        observed.lock.release()
+        worker.join(timeout=2)
+    assert response["result"]["required_prompt_handler"] is None
+
+
+def test_compute_turn_frame_uses_prompt_claimed_handler_not_mutable_resume_state(
+    monkeypatch,
+):
+    session = {
+        "history_lock": threading.Lock(), "history": [], "history_version": 0,
+        "attached_images": ["/tmp/card.png"], "session_key": "stored-ios",
+        "required_prompt_handler": None,
+        "_turn_required_prompt_handler": "hoppe_ocr_approval",
+        "cols": 80, "cwd": "/tmp", "source": "ios",
+    }
+    monkeypatch.setattr(server, "_session_cwd", lambda _session: "/tmp")
+    frame = server._compute_host_turn_frame("rid", "ui", session, "Bild")
+    assert frame["required_prompt_handler"] == "hoppe_ocr_approval"
 
 
 def test_eager_session_constructor_retains_required_prompt_handler(monkeypatch, tmp_path):
