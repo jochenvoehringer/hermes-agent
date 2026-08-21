@@ -2196,6 +2196,12 @@ def _compute_host_turn_frame(
             if image_paths is not None
             else list(session.get("attached_images", []))
         )
+        claimed_required_prompt_handler = normalize_required_prompt_handler(
+            session.get(
+                "_turn_required_prompt_handler",
+                session.get("required_prompt_handler"),
+            )
+        )
     return {
         "type": "turn.start",
         "sid": sid,
@@ -2212,9 +2218,7 @@ def _compute_host_turn_frame(
         "reasoning_config_override": session.get("create_reasoning_override"),
         "service_tier_override": session.get("create_service_tier_override"),
         "source": _session_source(session),
-        "required_prompt_handler": normalize_required_prompt_handler(
-            session.get("required_prompt_handler")
-        ),
+        "required_prompt_handler": claimed_required_prompt_handler,
         "app_chat_id": str(session.get("app_chat_id") or "").strip() or None,
         "attached_images": attached_images,
         "queued_prompt_generation": queued_prompt_generation,
@@ -11550,6 +11554,12 @@ def _run_prompt_submit(
         if not isinstance(inflight, dict) or inflight.get("status") == "error":
             _start_inflight_turn(session, text)
         agent = session["agent"]
+        claimed_required_prompt_handler = normalize_required_prompt_handler(
+            session.get(
+                "_turn_required_prompt_handler",
+                session.get("required_prompt_handler"),
+            )
+        )
         if hasattr(agent, "clear_interrupt"):
             try:
                 agent.clear_interrupt()
@@ -11663,7 +11673,7 @@ def _run_prompt_submit(
                 source=_session_source(session),
                 text=text,
                 attached_images=images,
-                required_prompt_handler=session.get("required_prompt_handler"),
+                required_prompt_handler=claimed_required_prompt_handler,
             )
             if dispatch_decision.action in {"respond", "block"}:
                 result = _complete_prompt_dispatch_response(

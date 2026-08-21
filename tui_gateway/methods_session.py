@@ -626,7 +626,8 @@ def _(rid, params: dict) -> dict:
             # The handler policy is transport/client-owned rather than durable
             # conversation state. Reconnects reassert (or clear) it before the
             # reused session can accept another turn.
-            session["required_prompt_handler"] = required_prompt_handler
+            with session["history_lock"]:
+                session["required_prompt_handler"] = required_prompt_handler
             payload = _live_session_payload(
                 sid,
                 session,

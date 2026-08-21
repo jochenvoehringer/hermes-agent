@@ -85,6 +85,60 @@ def test_pre_prompt_dispatch_is_a_public_plugin_hook():
     assert "pre_prompt_dispatch" in VALID_HOOKS
 
 
+@pytest.mark.parametrize("closing_field", ["_closing", "_hoppe_chat_deleted"])
+def test_real_prompt_handler_refuses_a_delete_claim(monkeypatch, closing_field):
+    session = _worker_session(SimpleNamespace())
+    session["running"] = False
+    session[closing_field] = True
+    monkeypatch.setattr(server, "_sess_nowait", lambda _params, _rid: (session, None))
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_args: None)
+    monkeypatch.setattr(server, "_load_dashboard_process_isolation_config", lambda: {})
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda *_args: False)
+    response = server._methods["prompt.submit"](
+        "rid",
+        {
+            "session_id": "ios-ui", "text": "Kontakt prüfen",
+            "reject_if_busy": True,
+            "required_prompt_handler": "hoppe_ocr_approval",
+        },
+    )
+    assert response["error"] == {"code": 4007, "message": "session not found"}
+    assert session["running"] is False
+
+
+def test_real_prompt_handler_claims_required_handler_with_the_turn(monkeypatch):
+    class DeferredThread:
+        def __init__(self, target=None, **_kwargs):
+            self.target = target
+        def start(self):
+            return None
+        def is_alive(self):
+            return True
+
+    session = _worker_session(SimpleNamespace())
+    session["running"] = False
+    session["required_prompt_handler"] = None
+    monkeypatch.setattr(server, "_sess_nowait", lambda _params, _rid: (session, None))
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_args: None)
+    monkeypatch.setattr(server, "_load_dashboard_process_isolation_config", lambda: {})
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda *_args: False)
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda *_args: None)
+    monkeypatch.setattr(server, "_persist_branch_seed", lambda *_args: None)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args: None)
+    monkeypatch.setattr(server.threading, "Thread", DeferredThread)
+    response = server._methods["prompt.submit"](
+        "rid",
+        {
+            "session_id": "ios-ui", "text": "Kontakt prüfen",
+            "reject_if_busy": True,
+            "required_prompt_handler": "  hoppe_ocr_approval  ",
+        },
+    )
+    assert response["result"]["status"] == "streaming"
+    assert session["required_prompt_handler"] == "hoppe_ocr_approval"
+    assert session["_turn_required_prompt_handler"] == "hoppe_ocr_approval"
+
+
 def test_required_image_turn_blocks_without_matching_directive():
     """A removed or unloaded required plugin must not expose the image to the agent."""
     from tui_gateway.prompt_dispatch_hooks import (
@@ -364,6 +418,36 @@ def test_worker_uses_matching_hook_response_without_agent(
     }
     assert len(db.batches) == 1
     assert worker_env[-1][2]["text"] == "Freigabe angelegt"
+
+
+def test_worker_uses_prompt_claimed_handler_after_desktop_resume_clear(
+    monkeypatch, tmp_path, worker_env,
+):
+    from tui_gateway.prompt_dispatch_hooks import PromptDispatchDecision
+
+    image_path = tmp_path / "claimed.png"
+    image_path.write_bytes(b"image")
+    calls = []
+    agent = SimpleNamespace(
+        session_id="stored-ios", _session_db=_RecordingDB(),
+        clear_interrupt=lambda: None,
+        run_conversation=lambda *_args, **_kwargs: calls.append("agent"),
+    )
+    session = _worker_session(agent, image_path)
+    session["required_prompt_handler"] = None
+    session["_turn_required_prompt_handler"] = "hoppe_ocr_approval"
+    monkeypatch.setattr(
+        server, "invoke_pre_prompt_dispatch",
+        lambda **kwargs: (
+            calls.append(kwargs),
+            PromptDispatchDecision(
+                action="block", handler="hoppe_ocr_approval", text="Geschützt",
+            ),
+        )[1],
+    )
+    server._run_prompt_submit("rid", "ios-ui", session, "Kontakt prüfen")
+    assert calls[0]["required_prompt_handler"] == "hoppe_ocr_approval"
+    assert "agent" not in calls
 
 
 def test_worker_persistence_failure_never_falls_through_to_agent(
