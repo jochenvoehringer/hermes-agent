@@ -3466,18 +3466,20 @@ def _ensure_session_db_row(session: dict) -> None:
     if parent_session_id:
         model_config["_branched_from"] = parent_session_id
     try:
-        db.create_session(
-            key,
-            source=_session_source(session),
-            model=row_model,
-            model_config=model_config or None,
-            parent_session_id=parent_session_id,
-            cwd=_persisted_session_cwd(session),
+        create_kwargs = {
+            "source": _session_source(session),
+            "model": row_model,
+            "model_config": model_config or None,
+            "parent_session_id": parent_session_id,
+            "cwd": _persisted_session_cwd(session),
             # Self-describing rows: aggregators that merge multiple profile DBs
             # into one list can't rely on which file a row came from alone. NULL
             # means the launch/default profile (matches run_agent's convention).
-            profile_name=Path(profile_home).name if profile_home else None,
-        )
+            "profile_name": Path(profile_home).name if profile_home else None,
+        }
+        if session.get("user_id") is not None:
+            create_kwargs["user_id"] = session["user_id"]
+        db.create_session(key, **create_kwargs)
         # A session can be born hidden (session.create hidden=true, or a
         # session.set_hidden that arrived before the row existed): apply the
         # deferred intent now that the row exists, mirroring pending_title.
