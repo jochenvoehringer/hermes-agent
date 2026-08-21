@@ -40,6 +40,7 @@ from agent.skill_commands import describe_skill_invocation
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from tui_gateway import git_probe
 from tui_gateway.prompt_dispatch_hooks import invoke_pre_prompt_dispatch
+from tui_gateway.session_subscribers import SessionSubscriberHub
 from tui_gateway.turn_marker import (
     clear_turn_marker,
     read_turn_marker,
@@ -143,6 +144,7 @@ except Exception:
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
 
 _sessions: dict[str, dict] = {}
+_session_subscribers = SessionSubscriberHub()
 _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _pending_prompt_payloads: dict[str, tuple[str, dict]] = {}
@@ -976,6 +978,7 @@ def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") ->
     """
     if not session:
         return
+    _session_subscribers.detach_runtime(str(session.get("session_key") or ""))
     _finalize_session(session, end_reason=end_reason)
     _announce_session_reclaimed(session, end_reason)
     try:
@@ -2038,8 +2041,50 @@ def _event_frame(event: str, sid: str, payload: dict | None = None) -> dict:
     return {"jsonrpc": "2.0", "method": "event", "params": params}
 
 
+def _broadcast_session_secondaries(sid: str, frame: dict) -> bool:
+    session = _sessions.get(sid)
+    if session is None:
+        return False
+    runtime_id = str(session.get("session_key") or sid)
+    primary = current_transport() or session.get("transport")
+    try:
+        return _session_subscribers.broadcast_secondary(runtime_id, primary, frame)
+    except Exception:
+        logger.debug("secondary session broadcast failed", exc_info=True)
+        return False
+
+
 def _emit(event: str, sid: str, payload: dict | None = None):
-    write_json(_event_frame(event, sid, payload))
+    frame = _event_frame(event, sid, payload)
+    write_json(frame)
+    _broadcast_session_secondaries(sid, frame)
+
+
+def _forward_compute_host_rpc(frame: dict) -> bool:
+    """Forward one compute-host RPC frame to its owner and subscribers."""
+    params = frame.get("params") or {}
+    sid = str(params.get("session_id") or "")
+    if frame.get("method") == "event" and params.get("type") == "hoppe.chat.session_rotated":
+        payload = params.get("payload") or {}
+        app_chat_id = str(payload.get("app_chat_id") or "")
+        new_runtime_id = str(payload.get("session_id") or "")
+        session = _sessions.get(sid)
+        if session is not None and app_chat_id and new_runtime_id:
+            old_runtime_id = str(session.get("session_key") or "")
+            lock = session.get("history_lock")
+            if lock is None:
+                session["session_key"] = new_runtime_id
+            else:
+                with lock:
+                    session["session_key"] = new_runtime_id
+            _session_subscribers.move_runtime(
+                old_runtime_id, new_runtime_id, app_chat_id
+            )
+    wrote = write_json(frame)
+    if frame.get("method") == "event":
+        if sid:
+            _broadcast_session_secondaries(sid, frame)
+    return wrote
 
 
 # Live client transports, one per connected WS peer (maintained by tui_gateway.ws).
@@ -2122,7 +2167,7 @@ def _get_compute_host_supervisor(cfg: dict | None = None):
             from tui_gateway.host_supervisor import HostSupervisor
 
             _compute_host_supervisor = HostSupervisor(
-                rpc_sink=write_json,
+                rpc_sink=_forward_compute_host_rpc,
                 heartbeat_secs=int(isolation_cfg.get("compute_host_heartbeat_secs") or 15),
                 respawn_max=int(isolation_cfg.get("compute_host_respawn_max") or 3),
             )
@@ -6039,6 +6084,17 @@ def _sync_session_key_after_compress(
     if not new_session_id or new_session_id == old_key:
         return
 
+    app_chat_id = ""
+    if _session_source(session) == "ios":
+        try:
+            with _session_db(session) as db:
+                if db is not None:
+                    app_chat_id, _tip, _lineage = db.get_compression_conversation(
+                        new_session_id
+                    )
+        except Exception:
+            logger.debug("compression app-chat resolution failed", exc_info=True)
+
     lease_reanchored = _transfer_active_session_slot(
         sid,
         session,
@@ -6106,6 +6162,13 @@ def _sync_session_key_after_compress(
             _restart_slash_worker(sid, session)
         except Exception:
             pass
+    if app_chat_id:
+        _session_subscribers.move_runtime(old_key, new_session_id, app_chat_id)
+        _emit(
+            "hoppe.chat.session_rotated",
+            sid,
+            {"app_chat_id": app_chat_id, "session_id": new_session_id},
+        )
 
 
 def _get_usage(agent) -> dict:
@@ -16536,3 +16599,7 @@ for _m in (
 ):
     _m.register(sys.modules[__name__])
 del _m
+
+from tui_gateway.rpc_extensions import install_rpc_extensions  # noqa: E402
+
+install_rpc_extensions(sys.modules[__name__])
