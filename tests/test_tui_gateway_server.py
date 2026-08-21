@@ -328,12 +328,14 @@ def test_prompt_submit_dispatches_to_compute_host_when_turn_isolation_enabled(mo
 def test_compute_host_turn_frame_carries_normalized_required_handler():
     session = _session(
         required_prompt_handler="hoppe_ocr_approval",
+        app_chat_id="app-root",
         attached_images=["/tmp/protected.png"],
     )
 
     frame = server._compute_host_turn_frame("rid", "sid", session, "inspect")
 
     assert frame["required_prompt_handler"] == "hoppe_ocr_approval"
+    assert frame["app_chat_id"] == "app-root"
 
 
 def test_compute_host_explicit_images_do_not_clear_later_attachment(monkeypatch):

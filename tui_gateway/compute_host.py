@@ -535,10 +535,12 @@ class ComputeHost:
         required_prompt_handler = normalize_required_prompt_handler(
             frame.get("required_prompt_handler")
         )
+        app_chat_id = str(frame.get("app_chat_id") or "").strip() or None
         session = server._sessions.get(sid)
         if session is not None:
             session["transport"] = self._transport
             session["required_prompt_handler"] = required_prompt_handler
+            session["app_chat_id"] = app_chat_id
             if frame.get("cols") is not None:
                 session["cols"] = int(frame.get("cols") or 80)
             if frame.get("cwd"):
@@ -639,11 +641,13 @@ class ComputeHost:
                 "model_override": frame.get("model_override"),
                 "source": server._sanitize_client_source(frame.get("source")),
                 "required_prompt_handler": required_prompt_handler,
+                "app_chat_id": app_chat_id,
                 "transport": self._transport,
             }
         session = server._sessions[sid]
         session["transport"] = self._transport
         session["required_prompt_handler"] = required_prompt_handler
+        session["app_chat_id"] = app_chat_id
         session["profile_home"] = profile_home or session.get("profile_home")
         if isinstance(frame.get("attached_images"), list):
             session["attached_images"] = list(frame.get("attached_images") or [])

@@ -483,6 +483,11 @@ def _(rid, params: dict) -> dict:
             try:
                 app_chat_id, _tip, _lineage = db.get_compression_conversation(target)
                 _session_subscribers.subscribe(app_chat_id, runtime_id, transport)
+                live = _find_live_session_by_key(runtime_id)
+                if live is not None:
+                    live_session = live[1]
+                    with live_session.get("history_lock", threading.Lock()):
+                        live_session["app_chat_id"] = app_chat_id
             except Exception:
                 logger.debug("iOS session subscriber registration failed", exc_info=True)
 
@@ -579,6 +584,7 @@ def _(rid, params: dict) -> dict:
                 logger.debug("child-watch display projection read failed", exc_info=True)
                 display_history = history
             messages = [] if omit_messages else _history_to_messages(display_history)
+            _subscribe_ios_runtime(target)
             return _ok(
                 rid,
                 {

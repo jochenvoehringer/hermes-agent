@@ -1,4 +1,3 @@
-import contextlib
 import threading
 from types import SimpleNamespace
 
@@ -120,6 +119,28 @@ def test_emit_delivers_primary_and_each_secondary_exactly_once(monkeypatch):
     assert observer.frames == [expected]
 
 
+def test_emit_uses_session_primary_precedence_when_observer_context_is_bound(
+    monkeypatch,
+):
+    hub = SessionSubscriberHub()
+    primary, observer = RecordingTransport(), RecordingTransport()
+    session = {"session_key": "runtime-1", "transport": primary}
+    monkeypatch.setattr(server, "_sessions", {"ui-1": session})
+    monkeypatch.setattr(server, "_session_subscribers", hub)
+    hub.subscribe("app-root", "runtime-1", primary)
+    hub.subscribe("app-root", "runtime-1", observer)
+
+    token = bind_transport(observer)
+    try:
+        server._emit("message.delta", "ui-1", {"text": "hello"})
+    finally:
+        reset_transport(token)
+
+    expected = server._event_frame("message.delta", "ui-1", {"text": "hello"})
+    assert primary.frames == [expected]
+    assert observer.frames == [expected]
+
+
 def test_compute_host_rpc_forwarding_delivers_secondary_once(monkeypatch):
     hub = SessionSubscriberHub()
     primary, observer = RecordingTransport(), RecordingTransport()
@@ -192,6 +213,9 @@ class _ResumeDB:
     def get_resume_conversations(self, _session_id):
         return [], []
 
+    def get_messages_as_conversation(self, _session_id, **_kwargs):
+        return []
+
     def get_ancestor_display_prefix(self, _session_id):
         return []
 
@@ -201,7 +225,15 @@ class _ResumeDB:
         return "app-root", self.target, ["app-root", self.target]
 
 
-def _resume_with_transport(monkeypatch, tmp_path, *, source: str, defer_history=False):
+def _resume_with_transport(
+    monkeypatch,
+    tmp_path,
+    *,
+    source: str,
+    defer_history=False,
+    eager_build=False,
+    lazy=False,
+):
     target = f"stored-{source}"
     db = _ResumeDB(target, str(tmp_path), source=source)
     hub = SessionSubscriberHub()
@@ -219,12 +251,35 @@ def _resume_with_transport(monkeypatch, tmp_path, *, source: str, defer_history=
         "_schedule_resume_hydration",
         lambda *_args, **_kwargs: setattr(db, "closed", True),
     )
+    if eager_build:
+        winner = server._deferred_session_record(
+            target,
+            cols=80,
+            cwd=str(tmp_path),
+            history=[],
+            lease=None,
+            source="desktop",
+        )
+
+        def build_then_lose_race(*_args, **_kwargs):
+            server._sessions["winner-ui"] = winner
+            return SimpleNamespace(close=lambda: None)
+
+        monkeypatch.setattr(server, "_make_agent", build_then_lose_race)
+        monkeypatch.setattr(server, "_set_session_context", lambda _target: [])
+        monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
 
     token = bind_transport(desktop)
     try:
         response = server._methods["session.resume"](
             "resume-desktop",
-            {"session_id": target, "defer_history": defer_history},
+            {
+                "session_id": target,
+                "source": "desktop",
+                "defer_history": defer_history,
+                "eager_build": eager_build,
+                "lazy": lazy,
+            },
         )
     finally:
         reset_transport(token)
@@ -237,6 +292,9 @@ def test_desktop_resume_subscribes_only_durable_ios_sessions(monkeypatch, tmp_pa
     )
 
     assert response["result"]["session_key"] == runtime_id
+    sid = response["result"]["session_id"]
+    assert server._sessions[sid]["source"] == "desktop"
+    assert server._sessions[sid]["app_chat_id"] == "app-root"
     assert hub.broadcast_secondary(runtime_id, None, {"method": "event"}) is True
     assert desktop.frames == [{"method": "event"}]
 
@@ -262,44 +320,94 @@ def test_deferred_desktop_resume_subscribes_before_hydration_closes_db(
     assert desktop.frames == [{"method": "event"}]
 
 
-def test_compression_rotation_moves_binding_and_emits_public_event(monkeypatch):
-    hub = SessionSubscriberHub()
-    primary, observer = RecordingTransport(), RecordingTransport()
-    hub.subscribe("app-root", "runtime-old", primary)
-    hub.subscribe("app-root", "runtime-old", observer)
-    session = {
-        "agent": SimpleNamespace(session_id="runtime-new"),
-        "session_key": "runtime-old",
-        "source": "ios",
-        "history_lock": threading.Lock(),
-        "transport": primary,
-    }
-    monkeypatch.setattr(server, "_sessions", {"ui-1": session})
-    monkeypatch.setattr(server, "_session_subscribers", hub)
+def test_lazy_desktop_resume_subscribes_durable_ios_session(monkeypatch, tmp_path):
+    response, hub, desktop, runtime_id = _resume_with_transport(
+        monkeypatch, tmp_path, source="ios", lazy=True
+    )
+
+    sid = response["result"]["session_id"]
+    assert server._sessions[sid]["app_chat_id"] == "app-root"
+    assert hub.broadcast_secondary(runtime_id, None, {"method": "event"}) is True
+    assert desktop.frames == [{"method": "event"}]
+
+
+def test_eager_resume_race_registers_desktop_and_stable_chat_metadata(
+    monkeypatch, tmp_path
+):
+    response, hub, desktop, runtime_id = _resume_with_transport(
+        monkeypatch, tmp_path, source="ios", eager_build=True
+    )
+
+    assert response["result"]["session_id"] == "winner-ui"
+    assert server._sessions["winner-ui"]["app_chat_id"] == "app-root"
+    assert hub.broadcast_secondary(runtime_id, None, {"method": "event"}) is True
+    assert desktop.frames == [{"method": "event"}]
+
+
+def test_desktop_resumed_ios_inline_compression_rotates_stable_chat(
+    monkeypatch, tmp_path
+):
+    response, hub, desktop, runtime_id = _resume_with_transport(
+        monkeypatch, tmp_path, source="ios"
+    )
+    sid = response["result"]["session_id"]
+    session = server._sessions[sid]
+    app = RecordingTransport()
+    hub.subscribe("app-root", runtime_id, app)
+    session["transport"] = app
+    session["agent"] = SimpleNamespace(session_id="runtime-new")
     monkeypatch.setattr(
         server, "_transfer_active_session_slot", lambda *_args, **_kwargs: True
     )
 
-    class _DB:
-        def get_compression_conversation(self, _session_id):
-            return "app-root", "runtime-new", ["app-root", "runtime-new"]
-
     monkeypatch.setattr(
-        server, "_session_db", lambda _session: contextlib.nullcontext(_DB())
+        server,
+        "_session_db",
+        lambda _session: (_ for _ in ()).throw(
+            AssertionError("stable metadata must avoid source/DB inference")
+        ),
     )
 
     server._sync_session_key_after_compress(
-        "ui-1", session, clear_pending_title=False, restart_slash_worker=False
+        sid, session, clear_pending_title=False, restart_slash_worker=False
     )
 
     expected = server._event_frame(
         "hoppe.chat.session_rotated",
-        "ui-1",
+        sid,
         {"app_chat_id": "app-root", "session_id": "runtime-new"},
     )
-    assert primary.frames == [expected]
-    assert observer.frames == [expected]
+    assert app.frames == [expected]
+    assert desktop.frames == [expected]
+    assert hub.broadcast_secondary(runtime_id, None, {"method": "old"}) is False
+
+
+def test_desktop_resumed_ios_isolated_rotation_reaches_app_and_desktop(
+    monkeypatch, tmp_path
+):
+    response, hub, desktop, runtime_id = _resume_with_transport(
+        monkeypatch, tmp_path, source="ios"
+    )
+    sid = response["result"]["session_id"]
+    session = server._sessions[sid]
+    app = RecordingTransport()
+    hub.subscribe("app-root", runtime_id, app)
+    session["transport"] = app
+    frame = server._event_frame(
+        "hoppe.chat.session_rotated",
+        sid,
+        {"app_chat_id": "app-root", "session_id": "runtime-new"},
+    )
+
+    server._forward_compute_host_rpc(frame)
+
+    assert app.frames == [frame]
+    assert desktop.frames == [frame]
+    assert session["session_key"] == "runtime-new"
+    assert session["app_chat_id"] == "app-root"
     assert hub.broadcast_secondary("runtime-old", None, {"method": "old"}) is False
+    assert hub.broadcast_secondary("runtime-new", app, {"method": "new"}) is True
+    assert desktop.frames[-1] == {"method": "new"}
 
 
 def test_runtime_teardown_detaches_binding_but_preserves_subscribers(monkeypatch):

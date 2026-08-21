@@ -1681,7 +1681,7 @@ def _broadcast_session_secondaries(sid: str, frame: dict) -> bool:
     if session is None:
         return False
     runtime_id = str(session.get("session_key") or sid)
-    primary = current_transport() or session.get("transport")
+    primary = session.get("transport") or current_transport()
     try:
         return _session_subscribers.broadcast_secondary(runtime_id, primary, frame)
     except Exception:
@@ -1709,9 +1709,11 @@ def _forward_compute_host_rpc(frame: dict) -> bool:
             lock = session.get("history_lock")
             if lock is None:
                 session["session_key"] = new_runtime_id
+                session["app_chat_id"] = app_chat_id
             else:
                 with lock:
                     session["session_key"] = new_runtime_id
+                    session["app_chat_id"] = app_chat_id
             _session_subscribers.move_runtime(
                 old_runtime_id, new_runtime_id, app_chat_id
             )
@@ -1845,6 +1847,7 @@ def _compute_host_turn_frame(
         "required_prompt_handler": normalize_required_prompt_handler(
             session.get("required_prompt_handler")
         ),
+        "app_chat_id": str(session.get("app_chat_id") or "").strip() or None,
         "attached_images": attached_images,
         "queued_prompt_generation": queued_prompt_generation,
     }
@@ -5480,8 +5483,8 @@ def _sync_session_key_after_compress(
     if not new_session_id or new_session_id == old_key:
         return
 
-    app_chat_id = ""
-    if _session_source(session) == "ios":
+    app_chat_id = str(session.get("app_chat_id") or "").strip()
+    if not app_chat_id and _session_source(session) == "ios":
         try:
             with _session_db(session) as db:
                 if db is not None:
