@@ -16962,6 +16962,39 @@ def test_session_create_records_source(monkeypatch):
         server._sessions.clear()
 
 
+def test_session_create_persists_client_supplied_server_owner(monkeypatch):
+    created = []
+
+    class _FakeDB:
+        def create_session(self, key, **kwargs):
+            created.append((key, kwargs))
+
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
+    monkeypatch.setattr(server, "_start_agent_build", lambda sid, session: None)
+    server._sessions.clear()
+    try:
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.create",
+                "params": {
+                    "profile": "router",
+                    "source": "ios",
+                    "user_id": "personal",
+                },
+            }
+        )
+        runtime_id = response["result"]["session_id"]
+        live = server._sessions[runtime_id]
+
+        assert live["user_id"] == "personal"
+        server._ensure_session_db_row(live)
+        assert created[0][1]["user_id"] == "personal"
+    finally:
+        server._sessions.clear()
+
+
 def test_shutdown_sessions_closes_every_session_via_helper(monkeypatch):
     seen = []
     monkeypatch.setattr(

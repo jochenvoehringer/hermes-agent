@@ -33,6 +33,11 @@ def _(rid, params: dict) -> dict:
         explicit_cwd = False
     resolved_cwd = _completion_cwd(params)
     source = _resolve_session_source(str(params.get("source") or "").strip() or None)
+    user_id = (
+        str(params.get("user_id") or "").strip()
+        if params.get("user_id") is not None
+        else None
+    ) or None
     from tui_gateway.prompt_dispatch_hooks import normalize_required_prompt_handler
 
     required_prompt_handler = normalize_required_prompt_handler(
@@ -110,6 +115,7 @@ def _(rid, params: dict) -> dict:
             "session_key": key,
             "show_reasoning": _load_show_reasoning(),
             "source": source,
+            "user_id": user_id,
             "slash_worker": None,
             "tool_progress_mode": _load_tool_progress_mode(),
             "tool_started_at": {},

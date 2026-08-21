@@ -4574,7 +4574,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         model: str = None,
         model_config: Dict[str, Any] = None,
         system_prompt: str = None,
-        user_id: str = None,
+        user_id: Optional[str] = None,
         session_key: Optional[str] = None,
         chat_id: str = None,
         chat_type: str = None,
@@ -8687,6 +8687,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
     def list_sessions_rich(
         self,
         source: str = None,
+        user_id: str = None,
         sources: List[str] = None,
         exclude_sources: List[str] = None,
         cwd_prefix: str = None,
@@ -8758,6 +8759,10 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         Pass ``session_key`` to restrict results to one stable gateway
         conversation scope (DM, group, channel, or thread, including the
         configured per-user isolation policy).
+
+        Pass ``user_id`` to enforce exact durable ownership in SQL before
+        ordering and paging. Compression projections are admitted only when
+        every continuation has the same non-NULL owner and source as the root.
         """
         # Rows carry token/cost totals — drain queued deltas first so
         # listings (sidebar, /resume, dashboards) show exact counters.
@@ -8788,6 +8793,54 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             placeholders = ",".join("?" for _ in include_sources)
             where_clauses.append(f"s.source IN ({placeholders})")
             params.extend(include_sources)
+        if user_id is not None:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id)
+            # Ownership must be consistent across the complete compression
+            # projection. A matching root with a NULL/foreign continuation is
+            # not a partially authorized conversation: hide it before paging
+            # rather than projecting the mismatched tip after LIMIT/OFFSET.
+            where_clauses.append(
+                """NOT EXISTS (
+                    WITH RECURSIVE owner_chain(id) AS (
+                        SELECT child.id
+                        FROM sessions child
+                        WHERE child.parent_session_id = s.id
+                          AND s.end_reason = 'compression'
+                          AND json_extract(
+                              COALESCE(child.model_config, '{}'),
+                              '$._branched_from'
+                          ) IS NULL
+                          AND json_extract(
+                              COALESCE(child.model_config, '{}'),
+                              '$._delegate_from'
+                          ) IS NULL
+                          AND COALESCE(child.source, '') != 'tool'
+                        UNION ALL
+                        SELECT child.id
+                        FROM owner_chain chain_row
+                        JOIN sessions parent ON parent.id = chain_row.id
+                        JOIN sessions child
+                          ON child.parent_session_id = chain_row.id
+                        WHERE parent.end_reason = 'compression'
+                          AND json_extract(
+                              COALESCE(child.model_config, '{}'),
+                              '$._branched_from'
+                          ) IS NULL
+                          AND json_extract(
+                              COALESCE(child.model_config, '{}'),
+                              '$._delegate_from'
+                          ) IS NULL
+                          AND COALESCE(child.source, '') != 'tool'
+                    )
+                    SELECT 1
+                    FROM owner_chain
+                    JOIN sessions owner_row ON owner_row.id = owner_chain.id
+                    WHERE owner_row.user_id IS NOT ?
+                       OR owner_row.source IS NOT s.source
+                )"""
+            )
+            params.append(user_id)
         if session_key:
             where_clauses.append("s.session_key = ?")
             params.append(session_key)
