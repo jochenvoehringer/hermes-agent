@@ -36,6 +36,12 @@ import { api } from "@/lib/api";
 import { formatSessionPruneResult } from "@/lib/session-prune";
 import { shouldRefreshSessions } from "@/lib/session-refresh";
 import {
+  conversationDeleteIds,
+  conversationDeleteRowCount,
+  conversationDeleteVisibleCount,
+  evictDeletedSessions,
+} from "@/lib/session-conversation-delete";
+import {
   importSummary,
   parseImportSessions,
 } from "@/lib/session-import";
@@ -46,11 +52,6 @@ import type {
   SessionStoreStats,
   StatusResponse,
 } from "@/lib/api";
-import {
-  conversationDeleteIds,
-  conversationDeleteRowCount,
-  evictDeletedSessions,
-} from "./conversation-delete";
 import { timeAgo } from "@/lib/utils";
 import { Markdown } from "@/components/Markdown";
 import { PlatformsCard } from "@/components/PlatformsCard";
@@ -1286,10 +1287,10 @@ export default function SessionsPage() {
           const response = await api.deleteSession(id);
           const deletedIds = conversationDeleteIds(response, [id]);
           const deletedSet = new Set(deletedIds);
-          const deletedRows = conversationDeleteRowCount(response, deletedIds);
+          const deletedVisible = conversationDeleteVisibleCount(response, [id]);
           setSessions((prev) => evictDeletedSessions(prev, deletedIds));
           setOverviewSessions((prev) => evictDeletedSessions(prev, deletedIds));
-          setTotal((prev) => Math.max(0, prev - deletedRows));
+          setTotal((prev) => Math.max(0, prev - deletedVisible));
           if (expandedId && deletedSet.has(expandedId)) setExpandedId(null);
           // Drop the deleted ID from any active bulk-select set — it
           // can't bulk-delete a row that's already gone.
@@ -1385,6 +1386,7 @@ export default function SessionsPage() {
       const resp = await api.bulkDeleteSessions(ids);
       const deletedIds = conversationDeleteIds(resp, ids);
       const deletedRows = conversationDeleteRowCount(resp, deletedIds);
+      const deletedVisible = conversationDeleteVisibleCount(resp, ids);
       showToast(
         t.sessions.selectedSessionsDeleted.replace(
           "{count}",
@@ -1400,7 +1402,7 @@ export default function SessionsPage() {
       const deletedSet = new Set(deletedIds);
       setSessions((prev) => evictDeletedSessions(prev, deletedIds));
       setOverviewSessions((prev) => evictDeletedSessions(prev, deletedIds));
-      setTotal((prev) => Math.max(0, prev - deletedRows));
+      setTotal((prev) => Math.max(0, prev - deletedVisible));
       if (expandedId && deletedSet.has(expandedId)) setExpandedId(null);
       clearSelection();
       loadSessions(page);

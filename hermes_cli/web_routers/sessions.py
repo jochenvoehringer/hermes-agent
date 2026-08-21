@@ -29,6 +29,12 @@ from hermes_cli.web_models import (
     SessionPrune,
     SessionRename,
 )
+from tui_gateway.session_mutation_extensions import (
+    SessionMutationBusy,
+    SessionMutationExtensionError,
+    SessionMutationRequest,
+    run_session_mutation,
+)
 
 # Same logger the handlers used before extraction (identical logger object).
 _log = logging.getLogger("hermes_cli.web_server")
@@ -48,6 +54,49 @@ _prune_sessions = late("_prune_sessions")
 _read_session_import_body = late("_read_session_import_body")
 _session_latest_descendant = late("_session_latest_descendant")
 _strip_session_list_rows = late("_strip_session_list_rows")
+
+
+def _mutation_requests_for_ids(profile, session_ids, actions):
+    """Plan process-local coordination without deciding the DB mutation."""
+    db = _open_session_db_for_profile(profile, read_only=True)
+    try:
+        profile_name = _cron_profile_home(profile)[0]
+        requests = {}
+        for requested_id in session_ids:
+            sid = db.resolve_session_id(requested_id)
+            if not sid:
+                continue
+            app_chat_id, tip_id, _lineage = db.get_compression_conversation(sid)
+            row = db.get_session(tip_id)
+            if not row:
+                continue
+            for action in actions:
+                request = SessionMutationRequest(
+                    profile=profile_name,
+                    session_id=app_chat_id,
+                    source=str(row.get("source") or ""),
+                    action=action,
+                )
+                requests[(app_chat_id, action)] = request
+        return tuple(requests[key] for key in sorted(requests))
+    finally:
+        db.close()
+
+
+def _run_coordinated_mutation(requests, mutation):
+    coordinated = mutation
+    for request in reversed(tuple(requests)):
+        inner = coordinated
+        coordinated = lambda request=request, inner=inner: run_session_mutation(
+            request, inner
+        )
+    return coordinated()
+
+
+def _mutation_http_error(exc):
+    if isinstance(exc, SessionMutationBusy):
+        return HTTPException(status_code=409, detail="chat_busy")
+    return HTTPException(status_code=503, detail="session_mutation_unavailable")
 
 
 @list_router.get("/api/sessions")
@@ -423,32 +472,21 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
     class _ExpandedDeleteScopeTooLarge(RuntimeError):
         pass
 
+    requests = _mutation_requests_for_ids(
+        body.profile, body.ids, ("delete",)
+    )
+
     def _delete() -> Dict[str, Any]:
         db = _open_session_db_for_profile(body.profile, read_only=False)
         try:
             profile_home = _cron_profile_home(body.profile)[1]
             sessions_dir = profile_home / "sessions"
-            resolved_ids = []
-            for requested_id in body.ids:
-                resolved = db.resolve_session_id(requested_id)
-                if resolved:
-                    resolved_ids.append(resolved)
 
             def _delete_on_conn(conn):
-                conversations = {}
-                for resolved_id in resolved_ids:
-                    preview = db._conversation_delete_preview_on_conn(
-                        conn, resolved_id
-                    )
-                    conversations[preview.app_chat_id] = preview
-
-                delete_ids = sorted(
-                    {
-                        session_id
-                        for preview in conversations.values()
-                        for session_id in preview.delete_ids
-                    }
+                targets = db._conversation_delete_targets_on_conn(
+                    conn, body.ids
                 )
+                delete_ids = list(targets.delete_ids)
                 if len(delete_ids) > 500:
                     raise _ExpandedDeleteScopeTooLarge
 
@@ -459,7 +497,7 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
                 )
                 return {
                     "ok": True,
-                    "deleted_conversations": len(conversations),
+                    "deleted_conversations": len(targets.conversations),
                     "deleted_rows": deleted_rows,
                     "deleted": deleted_rows,
                     "deleted_ids": sorted(set(actual_ids)),
@@ -476,12 +514,19 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
             db.close()
 
     try:
-        return await asyncio.to_thread(_delete)
+        return await asyncio.to_thread(
+            _run_coordinated_mutation, requests, _delete
+        )
     except _ExpandedDeleteScopeTooLarge as exc:
         raise HTTPException(
             status_code=400,
-            detail="expanded delete scope exceeds 500 rows",
+            detail=(
+                "Deleting these conversations would remove more than 500 "
+                "stored session rows. Select fewer conversations and try again."
+            ),
         ) from exc
+    except (SessionMutationBusy, SessionMutationExtensionError) as exc:
+        raise _mutation_http_error(exc) from exc
 
 
 @manage_router.post("/api/sessions/import")
@@ -732,41 +777,52 @@ async def delete_session_endpoint(session_id: str, profile: Optional[str] = None
             # leaves transient empty rows (reaped by empty-session hygiene) that
             # race the sidebar snapshot, which is exactly when this fired. Mirrors
             # the bulk-delete endpoint, which already treats ghost ids as success.
-            sid = db.resolve_session_id(session_id)
-            if not sid:
+            def _delete_on_conn(conn):
+                targets = db._conversation_delete_targets_on_conn(
+                    conn, (session_id,)
+                )
+                if not targets.conversations:
+                    return {
+                        "ok": True,
+                        "already_absent": True,
+                        "deleted_conversations": 0,
+                        "deleted_count": 0,
+                        "deleted_ids": [],
+                        "app_chat_id": session_id,
+                    }
+                preview = targets.conversations[0]
+                deleted_count, deleted_ids = db._delete_sessions_on_conn(
+                    conn,
+                    targets.delete_ids,
+                    expected_delete_ids=targets.delete_ids,
+                )
                 return {
                     "ok": True,
-                    "already_absent": True,
-                    "deleted_count": 0,
-                    "deleted_ids": [],
-                    "app_chat_id": session_id,
+                    "deleted_conversations": 1,
+                    "deleted_count": deleted_count,
+                    "deleted_ids": sorted(set(deleted_ids)),
+                    "app_chat_id": preview.app_chat_id,
                 }
-            preview = db.preview_conversation_delete(sid)
-            db.delete_conversation(
-                preview.app_chat_id,
-                preview.revision,
-                sessions_dir=sessions_dir if sessions_dir.exists() else None,
-            )
-            return {
-                "ok": True,
-                "deleted_count": len(preview.delete_ids),
-                "deleted_ids": sorted(preview.delete_ids),
-                "app_chat_id": preview.app_chat_id,
-            }
+
+            result = db._execute_write(_delete_on_conn)
+            for deleted_id in result["deleted_ids"]:
+                db._remove_session_files(
+                    sessions_dir if sessions_dir.exists() else None,
+                    deleted_id,
+                )
+            return result
         finally:
             db.close()
 
+    requests = _mutation_requests_for_ids(
+        profile, (session_id,), ("delete",)
+    )
     try:
-        return await asyncio.to_thread(_delete)
-    except Exception as exc:
-        from hermes_state import ConversationDeleteConflict
-
-        if isinstance(exc, ConversationDeleteConflict):
-            raise HTTPException(
-                status_code=409,
-                detail="conversation changed since delete preview",
-            ) from exc
-        raise
+        return await asyncio.to_thread(
+            _run_coordinated_mutation, requests, _delete
+        )
+    except (SessionMutationBusy, SessionMutationExtensionError) as exc:
+        raise _mutation_http_error(exc) from exc
 
 
 @manage_router.patch("/api/sessions/{session_id}")
@@ -781,53 +837,69 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
     ``SessionDB.set_session_read``). Any field may be omitted. ``profile``
     targets another profile's session.
     """
-    db = _open_session_db_for_profile(body.profile, read_only=False)
+    actions = []
+    if body.title is not None:
+        actions.append("rename")
+    if body.archived is not None:
+        actions.append("archive" if body.archived else "restore")
+    requests = _mutation_requests_for_ids(
+        body.profile, (session_id,), actions
+    )
+
+    def _update():
+        db = _open_session_db_for_profile(body.profile, read_only=False)
+        try:
+            sid = db.resolve_session_id(session_id)
+            if not sid:
+                raise HTTPException(status_code=404, detail="Session not found")
+            if (
+                body.title is None
+                and body.archived is None
+                and body.hidden is None
+                and body.pinned is None
+                and body.unread is None
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Nothing to update; provide 'title', 'archived', 'hidden', 'pinned', and/or 'unread'.",
+                )
+            if body.title is not None:
+                try:
+                    db.set_conversation_title(sid, body.title or "")
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+            if body.archived is not None:
+                db.set_session_archived(sid, body.archived)
+            if body.hidden is not None:
+                db.set_session_hidden(sid, body.hidden)
+            if body.pinned is not None:
+                db.set_session_pinned(sid, body.pinned)
+            if body.unread is not None:
+                db.set_session_read(sid, read=not body.unread)
+            app_chat_id, tip_id, _lineage = db.get_compression_conversation(sid)
+            result = {
+                "ok": True,
+                "app_chat_id": app_chat_id,
+                "title": db.get_session_title(tip_id) or "",
+            }
+            if body.archived is not None:
+                result["archived"] = bool(body.archived)
+            if body.hidden is not None:
+                result["hidden"] = bool(body.hidden)
+            if body.pinned is not None:
+                result["pinned"] = bool(body.pinned)
+            if body.unread is not None:
+                result["unread"] = bool(body.unread)
+            return result
+        finally:
+            db.close()
+
     try:
-        sid = db.resolve_session_id(session_id)
-        if not sid:
-            raise HTTPException(status_code=404, detail="Session not found")
-        if (
-            body.title is None
-            and body.archived is None
-            and body.hidden is None
-            and body.pinned is None
-            and body.unread is None
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="Nothing to update; provide 'title', 'archived', 'hidden', 'pinned', and/or 'unread'.",
-            )
-        if body.title is not None:
-            try:
-                db.set_conversation_title(sid, body.title or "")
-            except ValueError as e:
-                # Title too long, invalid characters, or already in use.
-                raise HTTPException(status_code=400, detail=str(e))
-        if body.archived is not None:
-            db.set_session_archived(sid, body.archived)
-        if body.hidden is not None:
-            db.set_session_hidden(sid, body.hidden)
-        if body.pinned is not None:
-            db.set_session_pinned(sid, body.pinned)
-        if body.unread is not None:
-            db.set_session_read(sid, read=not body.unread)
-        app_chat_id, tip_id, _lineage = db.get_compression_conversation(sid)
-        result = {
-            "ok": True,
-            "app_chat_id": app_chat_id,
-            "title": db.get_session_title(tip_id) or "",
-        }
-        if body.archived is not None:
-            result["archived"] = bool(body.archived)
-        if body.hidden is not None:
-            result["hidden"] = bool(body.hidden)
-        if body.pinned is not None:
-            result["pinned"] = bool(body.pinned)
-        if body.unread is not None:
-            result["unread"] = bool(body.unread)
-        return result
-    finally:
-        db.close()
+        return await asyncio.to_thread(
+            _run_coordinated_mutation, requests, _update
+        )
+    except (SessionMutationBusy, SessionMutationExtensionError) as exc:
+        raise _mutation_http_error(exc) from exc
 
 
 @manage_router.get("/api/sessions/{session_id}/export")

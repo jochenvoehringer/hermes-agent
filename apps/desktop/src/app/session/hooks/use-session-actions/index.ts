@@ -2152,9 +2152,11 @@ export function useSessionActions({
                 !(session._lineage_root_id && deletedSet.has(session._lineage_root_id))
             )
         )
+
         tombstoneSessions(deletedIds)
 
         // A deleted session's cached tail must not resurrect on a recycled id.
+
         for (const deletedId of deletedIds) {
           dropTranscriptTail(deletedId)
           clearQueuedPrompts(deletedId)

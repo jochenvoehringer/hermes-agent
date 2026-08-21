@@ -4037,6 +4037,12 @@ class ConversationDeletePreview:
     revision: str
 
 
+@dataclass(frozen=True)
+class ConversationDeleteTargets:
+    conversations: Tuple[ConversationDeletePreview, ...]
+    delete_ids: Tuple[str, ...]
+
+
 class ConversationDeleteConflict(RuntimeError):
     pass
 
@@ -9113,17 +9119,27 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         prefix and returns the single matching session ID if the prefix is
         unambiguous. Returns None for no matches or ambiguous prefixes.
         """
-        exact = self.get_session(session_id_or_prefix)
-        if exact:
-            return exact["id"]
+        with self._read_ctx() as conn:
+            return self._resolve_session_id_on_conn(conn, session_id_or_prefix)
 
+    @staticmethod
+    def _resolve_session_id_on_conn(
+        conn: sqlite3.Connection, session_id_or_prefix: str
+    ) -> Optional[str]:
+        """Resolve an exact/unique session ID using an existing transaction."""
+        exact = conn.execute(
+            "SELECT id FROM sessions WHERE id = ? LIMIT 1",
+            (session_id_or_prefix,),
+        ).fetchone()
+        if exact:
+            return str(exact["id"])
         escaped = _escape_like(session_id_or_prefix)
-        with self._lock:
-            cursor = self._conn.execute(
-                "SELECT id FROM sessions WHERE id LIKE ? ESCAPE '\\' ORDER BY started_at DESC LIMIT 2",
-                (f"{escaped}%",),
-            )
-            matches = [row["id"] for row in cursor.fetchall()]
+        cursor = conn.execute(
+            "SELECT id FROM sessions WHERE id LIKE ? ESCAPE '\\' "
+            "ORDER BY started_at DESC LIMIT 2",
+            (f"{escaped}%",),
+        )
+        matches = [row["id"] for row in cursor.fetchall()]
         if len(matches) == 1:
             return matches[0]
         return None
@@ -12991,6 +13007,38 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         """Describe the complete compression-lineage delete scope."""
         with self._read_ctx() as conn:
             return self._conversation_delete_preview_on_conn(conn, app_chat_id)
+
+    def _conversation_delete_targets_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        requested_ids: Iterable[str],
+    ) -> ConversationDeleteTargets:
+        """Resolve and expand visible conversations inside one transaction."""
+        conversations: Dict[str, ConversationDeletePreview] = {}
+        for requested_id in requested_ids:
+            resolved_id = self._resolve_session_id_on_conn(conn, requested_id)
+            if not resolved_id:
+                continue
+            preview = self._conversation_delete_preview_on_conn(
+                conn, resolved_id
+            )
+            conversations[preview.app_chat_id] = preview
+        ordered = tuple(
+            conversations[key] for key in sorted(conversations)
+        )
+        delete_ids = tuple(
+            sorted(
+                {
+                    session_id
+                    for preview in ordered
+                    for session_id in preview.delete_ids
+                }
+            )
+        )
+        return ConversationDeleteTargets(
+            conversations=ordered,
+            delete_ids=delete_ids,
+        )
 
     def delete_conversation(
         self,
