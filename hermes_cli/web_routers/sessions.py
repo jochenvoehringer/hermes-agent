@@ -394,7 +394,7 @@ async def search_sessions(
 
 @manage_router.post("/api/sessions/bulk-delete")
 async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
-    """Delete every session in ``body.ids`` in a single DB transaction.
+    """Delete every selected visible conversation in one DB transaction.
 
     Backs the dashboard's bulk-select-and-delete flow on the sessions
     page. POST (not DELETE) because most HTTP clients refuse to send a
@@ -402,27 +402,13 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
     of IDs — Starlette accepts both, but POSTing a list keeps proxies,
     curl, and the browser ``fetch`` API consistent.
 
-    Per-row contract matches :meth:`SessionDB.delete_sessions`:
+    User-visible selections expand through compression continuations and
+    delegated descendants. Explicit branches remain independent conversations.
+    Unknown IDs are skipped so stale UI selection remains idempotent.
 
-    * Unknown IDs are silently skipped (the response ``deleted`` count
-      reflects what really happened, not the input length). This is
-      deliberate — UI selection state can race against another tab's
-      delete, and we'd rather succeed-on-the-rest than fail-the-whole-
-      batch.
-    * Children of every deleted parent are orphaned, not cascade-
-      deleted.
-    * Active and archived sessions ARE deleted when explicitly
-      selected — unlike ``DELETE /api/sessions/empty``, the user
-      hand-picked the rows so we trust the selection.
-    * Like the other session-delete endpoints, this does NOT pass a
-      ``sessions_dir`` through; on-disk transcript / request-dump
-      cleanup runs at the CLI/agent layer on the next prune pass.
-
-    The response carries the actual deleted count, so the dashboard
-    can surface it in a toast. The IDs that were removed are not
-    echoed back because the client already knows what it asked to
-    delete (unknown IDs are silently skipped — see contract above)
-    and can prune its in-memory list directly from the request.
+    The legacy ``deleted`` field remains the deleted row count. Updated clients
+    consume ``deleted_ids`` because the expanded rows cannot be inferred from
+    the request IDs.
     """
     # Enforce a hard cap so a runaway/typo'd selection can't lock the
     # DB writer for an extended window. The dashboard pages 20 rows
@@ -434,15 +420,68 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
             status_code=400,
             detail="ids must contain at most 500 entries",
         )
-    def _delete() -> int:
+    class _ExpandedDeleteScopeTooLarge(RuntimeError):
+        pass
+
+    def _delete() -> Dict[str, Any]:
         db = _open_session_db_for_profile(body.profile, read_only=False)
         try:
-            return db.delete_sessions(body.ids)
+            profile_home = _cron_profile_home(body.profile)[1]
+            sessions_dir = profile_home / "sessions"
+            resolved_ids = []
+            for requested_id in body.ids:
+                resolved = db.resolve_session_id(requested_id)
+                if resolved:
+                    resolved_ids.append(resolved)
+
+            def _delete_on_conn(conn):
+                conversations = {}
+                for resolved_id in resolved_ids:
+                    preview = db._conversation_delete_preview_on_conn(
+                        conn, resolved_id
+                    )
+                    conversations[preview.app_chat_id] = preview
+
+                delete_ids = sorted(
+                    {
+                        session_id
+                        for preview in conversations.values()
+                        for session_id in preview.delete_ids
+                    }
+                )
+                if len(delete_ids) > 500:
+                    raise _ExpandedDeleteScopeTooLarge
+
+                deleted_rows, actual_ids = db._delete_sessions_on_conn(
+                    conn,
+                    delete_ids,
+                    expected_delete_ids=delete_ids,
+                )
+                return {
+                    "ok": True,
+                    "deleted_conversations": len(conversations),
+                    "deleted_rows": deleted_rows,
+                    "deleted": deleted_rows,
+                    "deleted_ids": sorted(set(actual_ids)),
+                }
+
+            result = db._execute_write(_delete_on_conn)
+            for deleted_id in result["deleted_ids"]:
+                db._remove_session_files(
+                    sessions_dir if sessions_dir.exists() else None,
+                    deleted_id,
+                )
+            return result
         finally:
             db.close()
 
-    deleted = await asyncio.to_thread(_delete)
-    return {"ok": True, "deleted": deleted}
+    try:
+        return await asyncio.to_thread(_delete)
+    except _ExpandedDeleteScopeTooLarge as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="expanded delete scope exceeds 500 rows",
+        ) from exc
 
 
 @manage_router.post("/api/sessions/import")
@@ -662,6 +701,8 @@ async def delete_session_endpoint(session_id: str, profile: Optional[str] = None
     def _delete():
         db = _open_session_db_for_profile(profile, read_only=False)
         try:
+            profile_home = _cron_profile_home(profile)[1]
+            sessions_dir = profile_home / "sessions"
             # Resolve exact ids / unique prefixes like every other session endpoint
             # (detail, messages, rename, export all do). A session that no longer
             # exists is an idempotent success: DELETE's contract is "ensure it's
@@ -673,13 +714,39 @@ async def delete_session_endpoint(session_id: str, profile: Optional[str] = None
             # the bulk-delete endpoint, which already treats ghost ids as success.
             sid = db.resolve_session_id(session_id)
             if not sid:
-                return {"ok": True, "already_absent": True}
-            db.delete_session(sid)
-            return {"ok": True}
+                return {
+                    "ok": True,
+                    "already_absent": True,
+                    "deleted_count": 0,
+                    "deleted_ids": [],
+                    "app_chat_id": session_id,
+                }
+            preview = db.preview_conversation_delete(sid)
+            db.delete_conversation(
+                preview.app_chat_id,
+                preview.revision,
+                sessions_dir=sessions_dir if sessions_dir.exists() else None,
+            )
+            return {
+                "ok": True,
+                "deleted_count": len(preview.delete_ids),
+                "deleted_ids": sorted(preview.delete_ids),
+                "app_chat_id": preview.app_chat_id,
+            }
         finally:
             db.close()
 
-    return await asyncio.to_thread(_delete)
+    try:
+        return await asyncio.to_thread(_delete)
+    except Exception as exc:
+        from hermes_state import ConversationDeleteConflict
+
+        if isinstance(exc, ConversationDeleteConflict):
+            raise HTTPException(
+                status_code=409,
+                detail="conversation changed since delete preview",
+            ) from exc
+        raise
 
 
 @manage_router.patch("/api/sessions/{session_id}")
@@ -710,7 +777,7 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
             )
         if body.title is not None:
             try:
-                db.set_session_title(sid, body.title or "")
+                db.set_conversation_title(sid, body.title or "")
             except ValueError as e:
                 # Title too long, invalid characters, or already in use.
                 raise HTTPException(status_code=400, detail=str(e))
@@ -720,7 +787,12 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
             db.set_session_pinned(sid, body.pinned)
         if body.unread is not None:
             db.set_session_read(sid, read=not body.unread)
-        result = {"ok": True, "title": db.get_session_title(sid) or ""}
+        app_chat_id, tip_id, _lineage = db.get_compression_conversation(sid)
+        result = {
+            "ok": True,
+            "app_chat_id": app_chat_id,
+            "title": db.get_session_title(tip_id) or "",
+        }
         if body.archived is not None:
             result["archived"] = bool(body.archived)
         if body.pinned is not None:
