@@ -400,7 +400,29 @@ def _(rid, params: dict) -> dict:
         if isinstance(raw_rebind_ids, list)
         else None
     )
-    with session["history_lock"]:
+    claim_lock = session["history_lock"]
+    while True:
+        claim_lock.acquire()
+        if not session.get("running"):
+            break
+        if is_truthy_value(params.get("reject_if_busy", False)):
+            claim_lock.release()
+            return _err(rid, 4094, "chat_busy")
+        raced_busy_transport = t or session.get("transport")
+        claim_lock.release()
+        busy_response = _handle_busy_submit(
+            rid,
+            sid,
+            session,
+            text,
+            raced_busy_transport,
+            queued=bool(params.get("queued")),
+        )
+        if busy_response is not None:
+            return busy_response
+        # The incumbent turn completed before the busy handler could queue
+        # this request. Re-enter the claim path instead of starting unlocked.
+    try:
         # A watch session's run lives in the PARENT turn, so its own running
         # flag is False — without this, typing mid-run builds a second agent
         # racing the in-flight child on the same stored session (interleaved
@@ -815,6 +837,8 @@ def _(rid, params: dict) -> dict:
         session["_turn_cancel_requested"] = False
         session["last_active"] = time.time()
         _start_inflight_turn(session, text)
+    finally:
+        claim_lock.release()
 
     if turn_isolation:
         isolated_response = _submit_prompt_to_compute_host(

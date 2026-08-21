@@ -4572,6 +4572,130 @@ def test_prompt_submit_reject_if_busy_does_not_queue_or_interrupt(monkeypatch):
         server._sessions.pop("busy-refusal", None)
 
 
+class _FirstCheckBarrierLock:
+    """Hold two submitters after their first idle check, before either claim."""
+
+    def __init__(self, parties=2):
+        self._lock = threading.Lock()
+        self._barrier = threading.Barrier(parties)
+        self._entry_count = {}
+
+    def acquire(self, *args, **kwargs):
+        return self._lock.acquire(*args, **kwargs)
+
+    def release(self):
+        self._lock.release()
+
+    def locked(self):
+        return self._lock.locked()
+
+    def __enter__(self):
+        self.acquire()
+        ident = threading.get_ident()
+        self._entry_count[ident] = self._entry_count.get(ident, 0) + 1
+        return self
+
+    def __exit__(self, *_args):
+        ident = threading.get_ident()
+        first_entry = self._entry_count[ident] == 1
+        self.release()
+        if first_entry:
+            self._barrier.wait(timeout=5)
+
+
+def _run_concurrent_prompt_submits(monkeypatch, *, reject_if_busy):
+    class _Agent:
+        def __init__(self):
+            self.interrupt_calls = 0
+
+        def interrupt(self):
+            self.interrupt_calls += 1
+
+    agent = _Agent()
+    session = _session(agent=agent, history_lock=_FirstCheckBarrierLock())
+    server._sessions["busy-race"] = session
+    host_submissions = []
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_args: None)
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda *_args: True)
+    monkeypatch.setattr(server, "_load_busy_input_mode", lambda: "queue")
+
+    def submit_to_host(rid, _sid, _session, text, **_kwargs):
+        host_submissions.append((rid, text))
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {"status": "streaming", "turn_isolation": True},
+        }
+
+    monkeypatch.setattr(server, "_submit_prompt_to_compute_host", submit_to_host)
+    responses = []
+
+    def submit(index):
+        responses.append(
+            server.handle_request(
+                {
+                    "id": f"request-{index}",
+                    "method": "prompt.submit",
+                    "params": {
+                        "session_id": "busy-race",
+                        "text": f"prompt-{index}",
+                        "reject_if_busy": reject_if_busy,
+                    },
+                }
+            )
+        )
+
+    threads = [threading.Thread(target=submit, args=(index,)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    return responses, session, agent, host_submissions
+
+
+def test_concurrent_reject_if_busy_atomically_accepts_only_one(monkeypatch):
+    """Two idle observations must still yield one claim and one refusal."""
+    try:
+        responses, session, agent, host_submissions = _run_concurrent_prompt_submits(
+            monkeypatch, reject_if_busy=True
+        )
+
+        successes = [response for response in responses if "result" in response]
+        refusals = [response for response in responses if "error" in response]
+        assert len(successes) == 1
+        assert successes[0]["result"] == {
+            "status": "streaming",
+            "turn_isolation": True,
+        }
+        assert len(refusals) == 1
+        assert refusals[0]["error"] == {"code": 4094, "message": "chat_busy"}
+        assert len(host_submissions) == 1
+        assert "queued_prompt" not in session
+        assert "queued_prompts" not in session
+        assert session.get("_turn_cancel_requested") is False
+        assert agent.interrupt_calls == 0
+    finally:
+        server._sessions.pop("busy-race", None)
+
+
+def test_concurrent_normal_submit_routes_raced_request_through_queue(monkeypatch):
+    """The non-reject loser must retain existing busy-input policy."""
+    try:
+        responses, session, agent, host_submissions = _run_concurrent_prompt_submits(
+            monkeypatch, reject_if_busy=False
+        )
+
+        statuses = sorted(response["result"]["status"] for response in responses)
+        assert statuses == ["queued", "streaming"]
+        assert len(host_submissions) == 1
+        assert session["queued_prompt"]["text"] in {"prompt-0", "prompt-1"}
+        assert agent.interrupt_calls == 0
+    finally:
+        server._sessions.pop("busy-race", None)
+
+
 def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
     calls = {"hooks": []}
 

@@ -423,7 +423,7 @@ def test_desktop_resumed_ios_isolated_rotation_reaches_app_and_desktop(
     assert desktop.frames == [frame]
     assert session["session_key"] == "runtime-new"
     assert session["app_chat_id"] == "app-root"
-    assert hub.broadcast_secondary("runtime-old", None, {"method": "old"}) is False
+    assert hub.broadcast_secondary(runtime_id, None, {"method": "old"}) is False
     assert hub.broadcast_secondary("runtime-new", app, {"method": "new"}) is True
     assert desktop.frames[-1] == {"method": "new"}
 
