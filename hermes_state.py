@@ -6787,7 +6787,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     f"Compression lease lost before publication: {parent_session_id}"
                 )
             parent = conn.execute(
-                """SELECT ended_at, cwd, git_branch, git_repo_root,
+                """SELECT ended_at, archived, cwd, git_branch, git_repo_root,
                           user_id, session_key, chat_id, chat_type,
                           thread_id, display_name, origin_json, profile_name
                    FROM sessions WHERE id = ?""",
@@ -6807,8 +6807,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                    system_prompt_hash,
                    parent_session_id, cwd, git_branch, git_repo_root,
                    profile_name, user_id, session_key, chat_id, chat_type,
-                   thread_id, display_name, origin_json, started_at
-                ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   thread_id, display_name, origin_json, archived, started_at
+                ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     child_session_id,
                     source,
@@ -6832,6 +6832,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     parent["thread_id"],
                     parent["display_name"],
                     parent["origin_json"],
+                    # Archive and compression publication are serialized by
+                    # BEGIN IMMEDIATE. If archive commits first, the child
+                    # must inherit that explicit hide inside this transaction;
+                    # if publication commits first, set_session_archived's
+                    # transaction-local lineage walker updates both rows.
+                    parent["archived"],
                     time.time(),
                 ),
             )
@@ -9437,11 +9443,10 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         displayed tip lets the still-unarchived root resurrect it on refresh.
         Returns True when at least one row was updated.
         """
-        lineage = self.get_compression_lineage(session_id)
-        if not lineage:
-            return False
-
         def _do(conn):
+            lineage = self._get_compression_lineage_on_conn(conn, session_id)
+            if not lineage:
+                return 0
             placeholders = ",".join("?" * len(lineage))
             cursor = conn.execute(
                 f"UPDATE sessions SET archived = ? "
