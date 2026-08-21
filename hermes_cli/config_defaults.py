@@ -3243,6 +3243,9 @@ DEFAULT_CONFIG = {
         # Idle threshold (days of no activity) before auto-archive hides a
         # session.  Only applies when auto_archive is true.
         "auto_archive_days": 3,
+        # Session source names exempt from stale auto-archive. This is a
+        # generic opt-in list; no client source is privileged by default.
+        "auto_archive_exclude_sources": [],
         # VACUUM after a prune that actually deleted rows.  SQLite does not
         # reclaim disk space on DELETE — freed pages are just reused on
         # subsequent INSERTs — so without VACUUM the file stays bloated
