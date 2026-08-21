@@ -118,6 +118,39 @@ describe("api.getModelOptions", () => {
   });
 });
 
+describe("session conversation delete responses", () => {
+  it("preserves expanded IDs from a single-delete response", async () => {
+    const response = {
+      app_chat_id: "root",
+      deleted_count: 3,
+      deleted_ids: ["root", "tip", "delegate"],
+      ok: true,
+    };
+    const fetchMock = jsonFetchMock(response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.deleteSession("root")).resolves.toEqual(response);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions/root",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("preserves additive bulk counts and the legacy deleted alias", async () => {
+    const response = {
+      deleted: 3,
+      deleted_conversations: 1,
+      deleted_ids: ["root", "tip", "delegate"],
+      deleted_rows: 3,
+      ok: true,
+    };
+    const fetchMock = jsonFetchMock(response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.bulkDeleteSessions(["root"])).resolves.toEqual(response);
+  });
+});
+
 describe("api OAuth helpers", () => {
   it("starts OAuth login in gated mode without requiring an injected session token", async () => {
     vi.stubGlobal("window", { __HERMES_AUTH_REQUIRED__: true });

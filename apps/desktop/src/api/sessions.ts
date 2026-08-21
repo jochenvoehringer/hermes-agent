@@ -481,8 +481,33 @@ export async function getAllSessionMessages(
   return { session_id: resolvedSessionId, messages }
 }
 
-export function deleteSession(id: string, profile?: ProfileScope): Promise<{ ok: boolean }> {
-  return hermesApi<{ ok: boolean }>({
+export interface SessionDeleteResponse {
+  ok: boolean
+  already_absent?: boolean
+  app_chat_id?: string
+  deleted_count?: number
+  deleted_ids?: string[]
+}
+
+export function sessionDeleteIds(
+  response: SessionDeleteResponse,
+  fallbackIds: Array<null | string | undefined>
+): string[] {
+  const source =
+    Array.isArray(response.deleted_ids) && response.deleted_ids.length > 0 ? response.deleted_ids : fallbackIds
+
+  return [
+    ...new Set(
+      source
+        .filter((id): id is string => typeof id === 'string')
+        .map(id => id.trim())
+        .filter(Boolean)
+    )
+  ]
+}
+
+export function deleteSession(id: string, profile?: ProfileScope): Promise<SessionDeleteResponse> {
+  return hermesApi<SessionDeleteResponse>({
     ...sessionScoped(profile),
     path: `/api/sessions/${encodeURIComponent(id)}`,
     method: 'DELETE'

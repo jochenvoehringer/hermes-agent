@@ -6,7 +6,13 @@ import { NO_PROJECT_ID } from '@/app/chat/sidebar/projects/workspace-groups'
 import { graftRefreshedTailOntoBackfill } from '@/app/chat/transcript-backfill'
 import { revealTreePane } from '@/components/pane-shell/tree/store'
 import { setWorkspaceScope } from '@/components/pane-shell/workspace-scope'
-import { deleteSession, getAllSessionMessages, getLatestSessionMessages, setSessionArchived } from '@/hermes'
+import {
+  deleteSession,
+  getAllSessionMessages,
+  getLatestSessionMessages,
+  sessionDeleteIds,
+  setSessionArchived
+} from '@/hermes'
 import { useI18n } from '@/i18n'
 import {
   type ChatMessage,
@@ -85,6 +91,7 @@ import {
   setResumeFailedSessionId,
   setSelectedStoredSessionId,
   setSessionOwnerHint,
+  setSessions,
   setSessionStartedAt,
   setTurnStartedAt,
   setWorkspaceCwdOwner,
@@ -2122,13 +2129,45 @@ export function useSessionActions({
           }).catch(() => undefined)
         }
 
-        await deleteSession(storedSessionId, removedOwner)
+        const response = await deleteSession(storedSessionId, removedOwner)
+        const deletedIds = sessionDeleteIds(response, removedIds)
+        const deletedSet = new Set(deletedIds)
+
+        // The backend is authoritative for compression/delegate expansion.
+        // Reconcile every returned technical row rather than guessing from the
+        // visible root/tip pair that initiated the mutation.
+        setSessions(prev =>
+          prev.filter(
+            session =>
+              !deletedSet.has(session.id) &&
+              !(session._lineage_root_id && deletedSet.has(session._lineage_root_id))
+          )
+        )
+        $archivedSessions.set(
+          $archivedSessions
+            .get()
+            .filter(
+              session =>
+                !deletedSet.has(session.id) &&
+                !(session._lineage_root_id && deletedSet.has(session._lineage_root_id))
+            )
+        )
+        tombstoneSessions(deletedIds)
+
         // A deleted session's cached tail must not resurrect on a recycled id.
-        dropTranscriptTail(storedSessionId)
+        for (const deletedId of deletedIds) {
+          dropTranscriptTail(deletedId)
+          clearQueuedPrompts(deletedId)
+        }
+
         // Only after the RPC lands — the optimistic eviction above can roll
         // back, and a rolled-back row must keep its watermark/marker.
-        forgetSessionUnread(removedIds, profile)
-        clearQueuedPrompts(storedSessionId)
+        forgetSessionUnread(
+          deletedIds,
+          typeof removedOwner === 'string'
+            ? removedOwner
+            : removedOwner?.targetProfile || removedOwner?.profile
+        )
 
         if (closingRuntimeId) {
           clearQueuedPrompts(closingRuntimeId)

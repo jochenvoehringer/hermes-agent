@@ -46,6 +46,11 @@ import type {
   SessionStoreStats,
   StatusResponse,
 } from "@/lib/api";
+import {
+  conversationDeleteIds,
+  conversationDeleteRowCount,
+  evictDeletedSessions,
+} from "./conversation-delete";
 import { timeAgo } from "@/lib/utils";
 import { Markdown } from "@/components/Markdown";
 import { PlatformsCard } from "@/components/PlatformsCard";
@@ -1278,16 +1283,20 @@ export default function SessionsPage() {
     onDelete: useCallback(
       async (id: string) => {
         try {
-          await api.deleteSession(id);
-          setSessions((prev) => prev.filter((s) => s.id !== id));
-          setTotal((prev) => prev - 1);
-          if (expandedId === id) setExpandedId(null);
+          const response = await api.deleteSession(id);
+          const deletedIds = conversationDeleteIds(response, [id]);
+          const deletedSet = new Set(deletedIds);
+          const deletedRows = conversationDeleteRowCount(response, deletedIds);
+          setSessions((prev) => evictDeletedSessions(prev, deletedIds));
+          setOverviewSessions((prev) => evictDeletedSessions(prev, deletedIds));
+          setTotal((prev) => Math.max(0, prev - deletedRows));
+          if (expandedId && deletedSet.has(expandedId)) setExpandedId(null);
           // Drop the deleted ID from any active bulk-select set — it
           // can't bulk-delete a row that's already gone.
           setSelectedIds((prev) => {
-            if (!prev.has(id)) return prev;
+            if (!deletedIds.some((deletedId) => prev.has(deletedId))) return prev;
             const next = new Set(prev);
-            next.delete(id);
+            for (const deletedId of deletedIds) next.delete(deletedId);
             return next;
           });
           // A single-session delete might have been an empty one — re-fetch
@@ -1374,10 +1383,12 @@ export default function SessionsPage() {
     setDeletingSelected(true);
     try {
       const resp = await api.bulkDeleteSessions(ids);
+      const deletedIds = conversationDeleteIds(resp, ids);
+      const deletedRows = conversationDeleteRowCount(resp, deletedIds);
       showToast(
         t.sessions.selectedSessionsDeleted.replace(
           "{count}",
-          String(resp.deleted),
+          String(deletedRows),
         ),
         "success",
       );
@@ -1386,9 +1397,10 @@ export default function SessionsPage() {
       // than waiting for the reload. The reload still runs so total /
       // pagination stays correct, and so any rows the reload pulls in
       // from later pages render in place.
-      const deletedSet = new Set(ids);
-      setSessions((prev) => prev.filter((s) => !deletedSet.has(s.id)));
-      setTotal((prev) => Math.max(0, prev - resp.deleted));
+      const deletedSet = new Set(deletedIds);
+      setSessions((prev) => evictDeletedSessions(prev, deletedIds));
+      setOverviewSessions((prev) => evictDeletedSessions(prev, deletedIds));
+      setTotal((prev) => Math.max(0, prev - deletedRows));
       if (expandedId && deletedSet.has(expandedId)) setExpandedId(null);
       clearSelection();
       loadSessions(page);

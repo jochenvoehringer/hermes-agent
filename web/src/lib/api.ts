@@ -402,7 +402,7 @@ export const api = {
       ),
     ),
   deleteSession: (id: string, profile = getManagementProfile()) =>
-    fetchJSON<{ ok: boolean }>(
+    fetchJSON<SessionDeleteResponse>(
       appendProfileParam(`/api/sessions/${encodeURIComponent(id)}`, profile),
       {
         method: "DELETE",
@@ -420,7 +420,7 @@ export const api = {
       },
     ),
   bulkDeleteSessions: (ids: string[], profile = getManagementProfile()) =>
-    fetchJSON<{ ok: boolean; deleted: number }>("/api/sessions/bulk-delete", {
+    fetchJSON<BulkSessionDeleteResponse>("/api/sessions/bulk-delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ids, profile: profile || undefined }),
@@ -1944,6 +1944,23 @@ export interface SessionInfo {
   output_tokens: number;
   preview: string | null;
   parent_session_id?: string | null;
+}
+
+export interface SessionDeleteResponse {
+  ok: boolean;
+  already_absent?: boolean;
+  app_chat_id?: string;
+  deleted_count?: number;
+  deleted_ids?: string[];
+}
+
+export interface BulkSessionDeleteResponse {
+  ok: boolean;
+  /** Backward-compatible alias returned by older and current backends. */
+  deleted: number;
+  deleted_conversations?: number;
+  deleted_rows?: number;
+  deleted_ids?: string[];
 }
 
 export interface SessionLatestDescendantResponse {
