@@ -245,6 +245,7 @@ def _resume_with_transport(
     defer_history=False,
     eager_build=False,
     lazy=False,
+    close_db_after_resume=True,
 ):
     target = f"stored-{source}"
     db = _ResumeDB(target, str(tmp_path), source=source)
@@ -261,7 +262,9 @@ def _resume_with_transport(
     monkeypatch.setattr(
         server,
         "_schedule_resume_hydration",
-        lambda *_args, **_kwargs: setattr(db, "closed", True),
+        lambda *_args, **_kwargs: (
+            setattr(db, "closed", True) if close_db_after_resume else None
+        ),
     )
     if eager_build:
         winner = server._deferred_session_record(
@@ -442,3 +445,40 @@ def test_runtime_teardown_detaches_binding_but_preserves_subscribers(monkeypatch
     hub.bind_runtime("app-root", "runtime-new")
     assert hub.broadcast_secondary("runtime-new", None, {"method": "rebound"}) is True
     assert observer.frames == [{"method": "rebound"}]
+
+
+def test_cold_ios_resume_rebinds_preserved_subscribers_after_idle_reap(
+    monkeypatch, tmp_path
+):
+    """The real ``session.resume`` hook, not a manual hub bind, rebinds peers."""
+    first, hub, desktop, durable_id = _resume_with_transport(
+        monkeypatch,
+        tmp_path,
+        source="ios",
+        close_db_after_resume=False,
+    )
+    first_runtime = first["result"]["session_id"]
+    app_b = RecordingTransport()
+    hub.subscribe("app-root", durable_id, app_b)
+    monkeypatch.setattr(server, "_finalize_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_announce_session_reclaimed", lambda *_args: None)
+    reaped = server._sessions.pop(first_runtime)
+    reaped["_sid"] = first_runtime
+    server._teardown_session(reaped, end_reason="idle_timeout")
+
+    app_a = RecordingTransport()
+    token = bind_transport(app_a)
+    try:
+        resumed = server._methods["session.resume"](
+            "resume-after-reap",
+            {"session_id": durable_id, "source": "ios"},
+        )
+    finally:
+        reset_transport(token)
+
+    assert "result" in resumed
+    new_runtime = resumed["result"]["session_id"]
+    assert new_runtime != first_runtime
+    rebound = {"method": "event", "params": {"type": "message.complete"}}
+    assert hub.broadcast_secondary(durable_id, None, rebound) is True
+    assert app_a.frames == app_b.frames == desktop.frames == [rebound]
