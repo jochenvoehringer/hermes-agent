@@ -94,10 +94,39 @@ def test_bulk_delete_sessiondb_work_runs_off_event_loop(monkeypatch):
     db_modes: list[bool] = []
 
     class _DB:
-        def delete_sessions(self, ids):
+        def resolve_session_id(self, session_id):
+            db_threads.append(threading.get_ident())
+            return session_id
+
+        def get_compression_conversation(self, session_id):
+            db_threads.append(threading.get_ident())
+            return session_id, session_id, (session_id,)
+
+        def get_session(self, session_id):
+            db_threads.append(threading.get_ident())
+            return {"id": session_id, "source": "cli"}
+
+        def _execute_write(self, mutation):
+            db_threads.append(threading.get_ident())
+            return mutation(object())
+
+        def _conversation_delete_targets_on_conn(self, conn, ids):
             db_threads.append(threading.get_ident())
             assert ids == ["one", "two"]
-            return 2
+            return type(
+                "Targets",
+                (),
+                {"conversations": ("one", "two"), "delete_ids": tuple(ids)},
+            )()
+
+        def _delete_sessions_on_conn(self, conn, ids, *, expected_delete_ids):
+            db_threads.append(threading.get_ident())
+            assert ids == expected_delete_ids == ["one", "two"]
+            return 2, ids
+
+        def _remove_session_files(self, sessions_dir, session_id):
+            db_threads.append(threading.get_ident())
+            assert session_id in {"one", "two"}
 
         def close(self):
             db_threads.append(threading.get_ident())
@@ -115,7 +144,13 @@ def test_bulk_delete_sessiondb_work_runs_off_event_loop(monkeypatch):
         )
     )
 
-    assert result == {"ok": True, "deleted": 2}
-    assert db_modes == [False]
+    assert result == {
+        "ok": True,
+        "deleted_conversations": 2,
+        "deleted_rows": 2,
+        "deleted": 2,
+        "deleted_ids": ["one", "two"],
+    }
+    assert db_modes == [True, False]
     assert db_threads
     assert all(thread_id != loop_thread for thread_id in db_threads)

@@ -56,34 +56,36 @@ _session_latest_descendant = late("_session_latest_descendant")
 _strip_session_list_rows = late("_strip_session_list_rows")
 
 
-def _mutation_requests_for_ids(profile, session_ids, actions):
+def _mutation_requests_for_db(db, profile, session_ids, actions):
     """Plan process-local coordination without deciding the DB mutation."""
+    profile_name = _cron_profile_home(profile)[0]
+    requests = {}
+    for requested_id in session_ids:
+        sid = db.resolve_session_id(requested_id)
+        if not sid:
+            continue
+        app_chat_id, tip_id, _lineage = db.get_compression_conversation(sid)
+        row = db.get_session(tip_id)
+        if not row:
+            continue
+        for action in actions:
+            request = SessionMutationRequest(
+                profile=profile_name,
+                session_id=app_chat_id,
+                source=str(row.get("source") or ""),
+                action=action,
+            )
+            requests[(app_chat_id, action)] = request
+    return tuple(requests[key] for key in sorted(requests))
+
+
+def _run_coordinated_mutation_for_ids(profile, session_ids, actions, mutation):
+    """Plan and run a coordinated mutation entirely in the worker thread."""
     db = _open_session_db_for_profile(profile, read_only=True)
     try:
-        profile_name = _cron_profile_home(profile)[0]
-        requests = {}
-        for requested_id in session_ids:
-            sid = db.resolve_session_id(requested_id)
-            if not sid:
-                continue
-            app_chat_id, tip_id, _lineage = db.get_compression_conversation(sid)
-            row = db.get_session(tip_id)
-            if not row:
-                continue
-            for action in actions:
-                request = SessionMutationRequest(
-                    profile=profile_name,
-                    session_id=app_chat_id,
-                    source=str(row.get("source") or ""),
-                    action=action,
-                )
-                requests[(app_chat_id, action)] = request
-        return tuple(requests[key] for key in sorted(requests))
+        requests = _mutation_requests_for_db(db, profile, session_ids, actions)
     finally:
         db.close()
-
-
-def _run_coordinated_mutation(requests, mutation):
     coordinated = mutation
     for request in reversed(tuple(requests)):
         inner = coordinated
@@ -472,10 +474,6 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
     class _ExpandedDeleteScopeTooLarge(RuntimeError):
         pass
 
-    requests = _mutation_requests_for_ids(
-        body.profile, body.ids, ("delete",)
-    )
-
     def _delete() -> Dict[str, Any]:
         db = _open_session_db_for_profile(body.profile, read_only=False)
         try:
@@ -515,7 +513,11 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
 
     try:
         return await asyncio.to_thread(
-            _run_coordinated_mutation, requests, _delete
+            _run_coordinated_mutation_for_ids,
+            body.profile,
+            body.ids,
+            ("delete",),
+            _delete,
         )
     except _ExpandedDeleteScopeTooLarge as exc:
         raise HTTPException(
@@ -814,12 +816,13 @@ async def delete_session_endpoint(session_id: str, profile: Optional[str] = None
         finally:
             db.close()
 
-    requests = _mutation_requests_for_ids(
-        profile, (session_id,), ("delete",)
-    )
     try:
         return await asyncio.to_thread(
-            _run_coordinated_mutation, requests, _delete
+            _run_coordinated_mutation_for_ids,
+            profile,
+            (session_id,),
+            ("delete",),
+            _delete,
         )
     except (SessionMutationBusy, SessionMutationExtensionError) as exc:
         raise _mutation_http_error(exc) from exc
@@ -842,10 +845,6 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
         actions.append("rename")
     if body.archived is not None:
         actions.append("archive" if body.archived else "restore")
-    requests = _mutation_requests_for_ids(
-        body.profile, (session_id,), actions
-    )
-
     def _update():
         db = _open_session_db_for_profile(body.profile, read_only=False)
         try:
@@ -896,7 +895,11 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
 
     try:
         return await asyncio.to_thread(
-            _run_coordinated_mutation, requests, _update
+            _run_coordinated_mutation_for_ids,
+            body.profile,
+            (session_id,),
+            actions,
+            _update,
         )
     except (SessionMutationBusy, SessionMutationExtensionError) as exc:
         raise _mutation_http_error(exc) from exc
