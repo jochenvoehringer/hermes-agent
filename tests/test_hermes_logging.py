@@ -136,6 +136,161 @@ class TestSetupLogging:
         assert agent_handlers[0].level == logging.WARNING
 
 
+class TestProfileLogIsolation:
+    """One shared process must not fan records out across profile homes."""
+
+    def test_process_record_does_not_enter_secondary_profile_logs(self, tmp_path):
+        process_home = tmp_path / "default"
+        profile_home = tmp_path / "profiles" / "office"
+        hermes_logging.setup_logging(hermes_home=process_home)
+        hermes_logging.setup_logging(hermes_home=profile_home)
+
+        logging.getLogger("test.profile_isolation").warning("process-only record")
+        hermes_logging.flush_log_queue()
+
+        process_agent_log = process_home / "logs" / "agent.log"
+        profile_agent_log = profile_home / "logs" / "agent.log"
+        profile_errors_log = profile_home / "logs" / "errors.log"
+        assert "process-only record" in process_agent_log.read_text()
+        assert "process-only record" not in profile_agent_log.read_text()
+        assert "process-only record" not in profile_errors_log.read_text()
+
+    def test_profile_record_enters_only_its_profile_logs(self, tmp_path):
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        process_home = tmp_path / "default"
+        profile_home = tmp_path / "profiles" / "office"
+        hermes_logging.setup_logging(hermes_home=process_home)
+        hermes_logging.setup_logging(hermes_home=profile_home)
+
+        token = set_hermes_home_override(profile_home)
+        try:
+            logging.getLogger("test.profile_isolation").warning("office-only record")
+        finally:
+            reset_hermes_home_override(token)
+        hermes_logging.flush_log_queue()
+
+        process_agent_log = process_home / "logs" / "agent.log"
+        profile_agent_log = profile_home / "logs" / "agent.log"
+        profile_errors_log = profile_home / "logs" / "errors.log"
+        assert "office-only record" in profile_agent_log.read_text()
+        assert "office-only record" in profile_errors_log.read_text()
+        assert "office-only record" not in process_agent_log.read_text()
+
+    def test_gateway_record_enters_only_its_profile_gateway_log(self, tmp_path):
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        process_home = tmp_path / "default"
+        profile_home = tmp_path / "profiles" / "router"
+        hermes_logging.setup_logging(hermes_home=process_home, mode="gateway")
+        hermes_logging.setup_logging(hermes_home=profile_home, mode="gateway")
+
+        token = set_hermes_home_override(profile_home)
+        try:
+            logging.getLogger("plugins.platforms.telegram.adapter").info(
+                "router telegram record"
+            )
+        finally:
+            reset_hermes_home_override(token)
+        hermes_logging.flush_log_queue()
+
+        process_gateway_log = process_home / "logs" / "gateway.log"
+        profile_gateway_log = profile_home / "logs" / "gateway.log"
+        assert "router telegram record" in profile_gateway_log.read_text()
+        assert "router telegram record" not in process_gateway_log.read_text()
+
+    def test_gui_record_enters_only_its_profile_gui_log(self, tmp_path):
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        process_home = tmp_path / "default"
+        profile_home = tmp_path / "profiles" / "office"
+        hermes_logging.setup_logging(hermes_home=process_home, mode="gui")
+        hermes_logging.setup_logging(hermes_home=profile_home, mode="gui")
+
+        token = set_hermes_home_override(profile_home)
+        try:
+            logging.getLogger("tui_gateway.ws").info("office desktop record")
+        finally:
+            reset_hermes_home_override(token)
+        hermes_logging.flush_log_queue()
+
+        process_gui_log = process_home / "logs" / "gui.log"
+        profile_gui_log = profile_home / "logs" / "gui.log"
+        assert "office desktop record" in profile_gui_log.read_text()
+        assert "office desktop record" not in process_gui_log.read_text()
+
+    def test_setup_restores_profile_tagging_after_factory_replacement(self, tmp_path):
+        from hermes_constants import (
+            hermes_home_key,
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        original_factory = logging.getLogRecordFactory()
+
+        def foreign_factory(*args, **kwargs):
+            return logging.LogRecord(*args, **kwargs)
+
+        logging.setLogRecordFactory(foreign_factory)
+        profile_home = tmp_path / "profiles" / "office"
+        try:
+            hermes_logging.setup_logging(hermes_home=profile_home)
+            token = set_hermes_home_override(profile_home)
+            try:
+                record = logging.getLogger("test.profile_isolation").makeRecord(
+                    "test.profile_isolation",
+                    logging.INFO,
+                    __file__,
+                    0,
+                    "factory replacement",
+                    (),
+                    None,
+                )
+            finally:
+                reset_hermes_home_override(token)
+
+            assert getattr(record, "hermes_home_key", None) == hermes_home_key(
+                profile_home
+            )
+        finally:
+            logging.setLogRecordFactory(original_factory)
+
+    def test_repeated_profile_records_resolve_home_key_once(self, tmp_path):
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        profile_home = tmp_path / "profiles" / "office"
+        hermes_logging.setup_logging(hermes_home=profile_home)
+        token = set_hermes_home_override(profile_home)
+        try:
+            with patch(
+                "hermes_logging.hermes_home_key",
+                wraps=hermes_logging.hermes_home_key,
+            ) as resolve_home_key:
+                logger = logging.getLogger("test.profile_isolation")
+                logger.makeRecord(
+                    logger.name, logging.INFO, __file__, 0, "first", (), None
+                )
+                logger.makeRecord(
+                    logger.name, logging.INFO, __file__, 0, "second", (), None
+                )
+        finally:
+            reset_hermes_home_override(token)
+
+        assert resolve_home_key.call_count == 1
+
+
 
 class TestGatewayMode:
     """setup_logging(mode='gateway') creates a filtered gateway.log."""
@@ -676,5 +831,3 @@ class TestAsyncQueueLogging:
             "agent.log" in getattr(h, "baseFilename", "")
             for h in hermes_logging.rotating_file_handlers()
         )
-
-

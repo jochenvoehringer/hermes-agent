@@ -35,6 +35,7 @@ import os
 import queue
 import sys
 import threading
+from functools import lru_cache
 from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
 from typing import Optional, Sequence
@@ -69,12 +70,21 @@ else:
     from logging.handlers import RotatingFileHandler  # noqa: E402
 
 
-from hermes_constants import get_config_path, get_hermes_home
+from hermes_constants import (
+    get_config_path,
+    get_hermes_home,
+    get_hermes_home_override,
+    hermes_home_key,
+)
 
 # Sentinel to track whether setup_logging() has already run.  The function
 # is idempotent — calling it twice is safe but the second call is a no-op
 # unless ``force=True``.
 _logging_initialized = False
+
+# First Hermes home initialised in this process. Records emitted without an
+# active profile context belong only to this handler set.
+_primary_home_key: Optional[str] = None
 
 # Thread-local storage for per-conversation session context.
 _session_context = threading.local()
@@ -177,11 +187,17 @@ def clear_session_context() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Record factory — injects session_tag into every LogRecord at creation
+# Record factory — injects session and profile context at record creation
 # ---------------------------------------------------------------------------
 
+@lru_cache(maxsize=128)
+def _cached_home_key(path: str) -> str:
+    """Resolve a repeated profile override once, outside the logging hot path."""
+    return hermes_home_key(path)
+
+
 def _install_session_record_factory() -> None:
-    """Replace the global LogRecord factory with one that adds ``session_tag``.
+    """Install Hermes session and profile context on every ``LogRecord``.
 
     Unlike a ``logging.Filter`` on a handler or logger, the record factory
     runs for EVERY record in the process — including records that propagate
@@ -201,6 +217,10 @@ def _install_session_record_factory() -> None:
         record = current_factory(*args, **kwargs)
         sid = getattr(_session_context, "session_id", None)
         record.session_tag = f" [{sid}]" if sid else ""  # type: ignore[attr-defined]
+        override = get_hermes_home_override()
+        record.hermes_home_key = (  # type: ignore[attr-defined]
+            _cached_home_key(override) if override else None
+        )
         return record
 
     _session_record_factory._hermes_session_injector = True  # type: ignore[attr-defined]
@@ -229,6 +249,32 @@ class _ComponentFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         return record.name.startswith(self._prefixes)
+
+
+class _ProfileHomeFilter(logging.Filter):
+    """Accept records for one Hermes home plus process records on the primary."""
+
+    def __init__(self, home_key: str, *, is_primary: bool) -> None:
+        super().__init__()
+        self._home_key = home_key
+        self._is_primary = is_primary
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record_home = getattr(record, "hermes_home_key", None)
+        if record_home is None:
+            return self._is_primary
+        return record_home == self._home_key
+
+
+class _ConjunctiveFilter(logging.Filter):
+    """Accept a record only when every supplied handler filter accepts it."""
+
+    def __init__(self, *filters: logging.Filter) -> None:
+        super().__init__()
+        self._filters = filters
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return all(log_filter.filter(record) for log_filter in self._filters)
 
 
 # Logger name prefixes that belong to each component.
@@ -299,7 +345,10 @@ def setup_logging(
     Path
         The ``logs/`` directory where files are written.
     """
-    global _logging_initialized
+    global _logging_initialized, _primary_home_key
+    # Record factories are process-global and may be replaced after import.
+    # Reassert Hermes context tagging before registering profile handlers.
+    _install_session_record_factory()
     home = hermes_home or get_hermes_home()
     log_dir = home / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -317,6 +366,15 @@ def setup_logging(
 
     root = logging.getLogger()
 
+    home_key = hermes_home_key(home)
+    with _queue_state_lock:
+        if _primary_home_key is None:
+            _primary_home_key = home_key
+        home_filter = _ProfileHomeFilter(
+            home_key,
+            is_primary=home_key == _primary_home_key,
+        )
+
     # --- agent.log (INFO+) — the main activity log -------------------------
     _add_rotating_handler(
         root,
@@ -325,6 +383,7 @@ def setup_logging(
         max_bytes=max_bytes,
         backup_count=backups,
         formatter=RedactingFormatter(_LOG_FORMAT),
+        log_filter=home_filter,
     )
 
     # --- errors.log (WARNING+) — quick triage log --------------------------
@@ -335,6 +394,7 @@ def setup_logging(
         max_bytes=2 * 1024 * 1024,
         backup_count=2,
         formatter=RedactingFormatter(_LOG_FORMAT),
+        log_filter=home_filter,
     )
 
     # --- gateway.log (INFO+, gateway component only) ------------------------
@@ -346,7 +406,10 @@ def setup_logging(
             max_bytes=5 * 1024 * 1024,
             backup_count=3,
             formatter=RedactingFormatter(_LOG_FORMAT),
-            log_filter=_ComponentFilter(COMPONENT_PREFIXES["gateway"]),
+            log_filter=_ConjunctiveFilter(
+                _ComponentFilter(COMPONENT_PREFIXES["gateway"]),
+                home_filter,
+            ),
         )
 
     # --- gui.log (INFO+, dashboard/tui-gateway components) -----------------
@@ -358,7 +421,10 @@ def setup_logging(
             max_bytes=10 * 1024 * 1024,
             backup_count=5,
             formatter=RedactingFormatter(_LOG_FORMAT),
-            log_filter=_ComponentFilter(COMPONENT_PREFIXES["gui"]),
+            log_filter=_ConjunctiveFilter(
+                _ComponentFilter(COMPONENT_PREFIXES["gui"]),
+                home_filter,
+            ),
         )
 
     if _logging_initialized and not force:
@@ -702,7 +768,7 @@ def rotating_file_handlers() -> list:
 
 def _reset_queued_handlers() -> None:
     """Tear down the async logging queue + listener (test-isolation helper)."""
-    global _log_queue
+    global _log_queue, _primary_home_key
     with _queue_state_lock:
         _stop_queue_listener_locked()
         root = logging.getLogger()
@@ -716,6 +782,7 @@ def _reset_queued_handlers() -> None:
                 pass
         _queued_file_handlers.clear()
         _log_queue = None
+        _primary_home_key = None
 
 
 def _add_rotating_handler(
