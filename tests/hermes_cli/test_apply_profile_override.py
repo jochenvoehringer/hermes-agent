@@ -85,6 +85,28 @@ class TestApplyProfileOverrideHermesHomeGuard:
             f"Expected HERMES_HOME to end with 'coder', got: {result!r}"
         )
 
+    def test_config_command_trusts_explicit_root_home(
+        self, tmp_path, monkeypatch
+    ):
+        """Config reads and writes stay in an explicitly selected root home.
+
+        A sticky profile is a runtime default, but it must not redirect a
+        config command whose caller deliberately supplied a root
+        ``HERMES_HOME``. Callers can still select a named profile with ``-p``.
+        """
+        hermes_root = tmp_path / ".hermes"
+        hermes_root.mkdir(parents=True, exist_ok=True)
+
+        result = _run_apply_profile_override(
+            tmp_path,
+            monkeypatch,
+            hermes_home=str(hermes_root),
+            active_profile="coder",
+            argv=["hermes", "config", "get", "display.skin"],
+        )
+
+        assert result == str(hermes_root)
+
 
     def test_sudo_explicit_profile_resolves_invoking_users_profile(self, tmp_path, monkeypatch):
         """sudo elias ... should resolve `-p elias` under SUDO_USER, not root."""
@@ -163,4 +185,3 @@ class TestSupervisedChildIgnoresStickyProfile:
         result = os.environ.get("HERMES_HOME")
         assert result is not None
         assert result.endswith("coder")
-

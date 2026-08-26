@@ -524,6 +524,7 @@ def _apply_profile_override() -> None:
     profile_name = None
     consume = 0
     profile_index = None
+    top_level_command = None
 
     def _inside_mcp_add_args(index: int) -> bool:
         """True once argv reaches `hermes mcp add ... --args <command argv>`.
@@ -603,6 +604,8 @@ def _apply_profile_override() -> None:
         ):
             i += 2
         else:
+            if top_level_command is None and not arg.startswith("-"):
+                top_level_command = arg
             i += 1
 
     # 1b. Reject values that can't be valid profile names (e.g. pytest's
@@ -628,7 +631,10 @@ def _apply_profile_override() -> None:
     # See issue #22502.
     hermes_home_env = os.environ.get("HERMES_HOME", "")
     if profile_name is None and hermes_home_env:
-        if Path(hermes_home_env).parent.name == "profiles":
+        if (
+            Path(hermes_home_env).parent.name == "profiles"
+            or top_level_command == "config"
+        ):
             return
 
     # 2. If no flag, check active_profile in the hermes root.
