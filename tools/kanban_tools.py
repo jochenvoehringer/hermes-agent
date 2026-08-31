@@ -31,6 +31,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import unicodedata
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
@@ -1397,6 +1399,22 @@ def _handle_create(args: dict, **kw) -> str:
     idempotency_key = args.get("idempotency_key")
     max_runtime_seconds = args.get("max_runtime_seconds")
     initial_status = args.get("initial_status") or "running"
+    if str(initial_status).strip().lower() == "blocked":
+        return tool_error(
+            "kanban_create: naked initially blocked tasks are forbidden; use the "
+            "domain approval service. Do not retry as running, because that would "
+            "bypass the human decision."
+        )
+    normalized_body = (
+        unicodedata.normalize("NFKC", body).casefold()
+        if isinstance(body, str)
+        else ""
+    )
+    if re.search(r"\bmodus\s*:\s*write_authorized\b", normalized_body):
+        return tool_error(
+            "kanban_create: workers cannot mint write authorization. Create a "
+            "domain approval proposal and wait for the human decision."
+        )
     skills = args.get("skills")
     if isinstance(skills, str):
         # Accept a single skill name as a string for convenience.
@@ -2239,12 +2257,11 @@ KANBAN_CREATE_SCHEMA = {
             },
             "initial_status": {
                 "type": "string",
-                "enum": ["running", "blocked"],
+                "enum": ["running"],
                 "description": (
-                    "Initial card status. Use 'blocked' for tasks that "
-                    "require immediate human ops (R3 gate) to skip the "
-                    "brief running-to-blocked transition. Defaults to "
-                    "'running', which preserves the usual dispatch path."
+                    "Initial card status. Worker-created cards may only be "
+                    "running. Human approval cards must be created atomically "
+                    "by a domain approval service, never by this tool."
                 ),
             },
             "skills": {
