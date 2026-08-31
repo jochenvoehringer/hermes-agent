@@ -2994,8 +2994,9 @@ class MCPServerTask:
 
             if not psutil.pid_exists(pid):
                 continue  # this one is dead
-            return True  # alive (signal permission irrelevant for liveness)
-            return False  # at least one child alive
+            return False  # at least one child alive (signal permission
+            # irrelevant for liveness) — inverting this fail-fasted every
+            # stdio call while the subprocess was demonstrably alive (#94335)
         return True
 
     async def _watch_stdio_children(self) -> None:
