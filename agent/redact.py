@@ -778,6 +778,7 @@ def redact_sensitive_text(
     code_file: bool = False,
     file_read: bool = False,
     redact_url_credentials: bool = False,
+    redact_phone_numbers: bool = True,
 ) -> str:
     """Apply all redaction patterns to a block of text.
 
@@ -997,8 +998,11 @@ def redact_sensitive_text(
     if "&" in text and "=" in text:
         text = _redact_form_body(text)
 
-    # E.164 phone numbers (Signal, WhatsApp)
-    if "+" in text:
+    # E.164 phone numbers (Signal, WhatsApp). Durable local stores such as
+    # Kanban can disable this PII-specific pass while retaining every secret
+    # pattern above; their model-facing boundary applies its own target-aware
+    # privacy policy.
+    if redact_phone_numbers and "+" in text:
         def _redact_phone(m):
             phone = m.group(1)
             if len(phone) <= 8:

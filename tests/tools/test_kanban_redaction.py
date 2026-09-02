@@ -140,3 +140,30 @@ def test_kanban_complete_result_field_scrubbed(worker_env):
     assert run is not None
     stored = run.summary or run.result if hasattr(run, "result") else run.summary or ""
     assert secret not in (stored or "")
+
+
+def test_kanban_completion_preserves_pii_while_scrubbing_secret(worker_env):
+    """Local handoffs keep contact data but never persist credentials."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    secret = "ghp_" + "P" * 40
+    phone = "+491701234567"
+    summary = (
+        "Clara Zrenner, clara.zrenner@example.com, "
+        f"{phone}; credential {secret}"
+    )
+
+    kt._handle_complete({"summary": summary})
+    conn = kb.connect()
+    try:
+        run = kb.latest_run(conn, worker_env)
+    finally:
+        conn.close()
+
+    assert run is not None
+    stored = run.summary or ""
+    assert "Clara Zrenner" in stored
+    assert "clara.zrenner@example.com" in stored
+    assert phone in stored
+    assert secret not in stored

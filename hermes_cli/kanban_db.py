@@ -6477,7 +6477,9 @@ def redact_review_value(value: Any) -> Any:
     if isinstance(value, str):
         from agent.redact import redact_sensitive_text
 
-        return redact_sensitive_text(value, force=True)
+        return redact_sensitive_text(
+            value, force=True, redact_phone_numbers=False,
+        )
     if isinstance(value, dict):
         return {key: redact_review_value(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -11246,7 +11248,12 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
             lines.append(_cap(c.body, _CTX_MAX_COMMENT_BYTES))
             lines.append("")
 
-    return "\n".join(lines).rstrip() + "\n"
+    context = "\n".join(lines).rstrip() + "\n"
+    if (task.assignee or "").strip().casefold() == "preis":
+        from hermes_cli.kanban_privacy import pseudonymize_price_context
+
+        return pseudonymize_price_context(context)
+    return context
 
 
 # ---------------------------------------------------------------------------

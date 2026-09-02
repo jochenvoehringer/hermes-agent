@@ -43,6 +43,13 @@ from hermes_cli.config import cfg_get, load_config
 logger = logging.getLogger(__name__)
 
 
+def _redact_kanban_secrets(value: object) -> str:
+    """Scrub credentials while preserving PII in the local Kanban store."""
+    return redact_sensitive_text(
+        str(value), force=True, redact_phone_numbers=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Gating
 # ---------------------------------------------------------------------------
@@ -431,6 +438,10 @@ def inject_new_comments_from_env(agent: Any) -> bool:
         + "Take it into account for the work you're doing right now:\n"
         + "\n".join(lines)
     )
+    if own.casefold() == "preis":
+        from hermes_cli.kanban_privacy import pseudonymize_price_context
+
+        note = pseudonymize_price_context(note)
     try:
         return bool(agent.steer(note))
     except Exception:
@@ -671,12 +682,12 @@ def _handle_complete(args: dict, **kw) -> str:
     metadata = args.get("metadata")
     result = args.get("result")
     if summary:
-        summary = redact_sensitive_text(str(summary), force=True)
+        summary = _redact_kanban_secrets(summary)
     if result:
-        result = redact_sensitive_text(str(result), force=True)
+        result = _redact_kanban_secrets(result)
     if metadata is not None and isinstance(metadata, dict):
         meta_json = json.dumps(metadata)
-        meta_json = redact_sensitive_text(meta_json, force=True)
+        meta_json = _redact_kanban_secrets(meta_json)
         try:
             metadata = json.loads(meta_json)
         except json.JSONDecodeError:
@@ -832,7 +843,7 @@ def _handle_block(args: dict, **kw) -> str:
     reason = args.get("reason")
     if not reason or not str(reason).strip():
         return tool_error("reason is required — explain what input you need")
-    reason = redact_sensitive_text(str(reason), force=True)
+    reason = _redact_kanban_secrets(reason)
     kind = args.get("kind")
     board = args.get("board")
     try:
@@ -916,14 +927,14 @@ def _handle_request_review(args: dict, **kw) -> str:
             "summary is required — describe what was implemented and how it "
             "was verified so the reviewer has context"
         )
-    summary = redact_sensitive_text(str(summary), force=True)
+    summary = _redact_kanban_secrets(summary)
     metadata = args.get("metadata")
     if metadata is not None and not isinstance(metadata, dict):
         return tool_error(
             f"metadata must be an object/dict, got {type(metadata).__name__}"
         )
     if metadata is not None:
-        metadata_json = redact_sensitive_text(json.dumps(metadata), force=True)
+        metadata_json = _redact_kanban_secrets(json.dumps(metadata))
         try:
             metadata = json.loads(metadata_json)
         except json.JSONDecodeError:
@@ -933,7 +944,7 @@ def _handle_request_review(args: dict, **kw) -> str:
     if reviewer:
         # Model-supplied free text stored durably on the event payload —
         # redact like summary / kanban_block's reason.
-        reviewer = redact_sensitive_text(str(reviewer), force=True)
+        reviewer = _redact_kanban_secrets(reviewer)
     board = args.get("board")
     try:
         kb, conn = _connect(board=board)
@@ -991,7 +1002,7 @@ def _handle_request_changes(args: dict, **kw) -> str:
     reason = args.get("reason")
     if not reason or not str(reason).strip():
         return tool_error("reason is required — describe the changes needed")
-    reason = redact_sensitive_text(str(reason), force=True)
+    reason = _redact_kanban_secrets(reason)
     board = args.get("board")
     try:
         kb, conn = _connect(board=board)
@@ -1091,7 +1102,7 @@ def _handle_comment(args: dict, **kw) -> str:
     body = args.get("body")
     if not body or not str(body).strip():
         return tool_error("body is required")
-    body = redact_sensitive_text(str(body), force=True)
+    body = _redact_kanban_secrets(body)
     # Author is intentionally derived from the worker's own runtime
     # identity, NOT from caller-supplied args. Comments are injected
     # into the next worker's system prompt by ``build_worker_context``

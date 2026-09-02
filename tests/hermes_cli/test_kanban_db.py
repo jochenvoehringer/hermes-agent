@@ -492,6 +492,99 @@ def test_delete_task_removes_task_and_cascades(kanban_home):
 # ---------------------------------------------------------------------------
 
 
+def test_price_worker_context_pseudonymizes_contact_pii(kanban_home):
+    """A Preis worker must not receive contact PII from the shared board."""
+    body = (
+        "Recherche zu Bauvorhaben der GESOBAU AG. Kontaktdaten von "
+        "Clara Zrenner, Objektleiterin: clara.zrenner@example.com, "
+        "Telefon +49 30 1234567, Mobil +491701234567."
+    )
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="Preis fuer Clara Zrenner ermitteln",
+            body=body,
+            assignee="preis",
+        )
+        context = kb.build_worker_context(conn, task_id)
+        stored = kb.get_task(conn, task_id)
+
+    assert stored is not None and stored.body == body
+    assert "Clara Zrenner" not in context
+    assert "clara.zrenner@example.com" not in context
+    assert "+49 30 1234567" not in context
+    assert "+491701234567" not in context
+    assert "[PERSON_1]" in context
+    assert "[EMAIL_1]" in context
+    assert "[PHONE_1]" in context
+    assert "GESOBAU AG" in context
+
+
+def test_non_price_worker_context_preserves_contact_pii(kanban_home):
+    """Research and other profiles must receive the original task text."""
+    body = (
+        "Recherche zu Bauvorhaben der GESOBAU AG mit Clara Zrenner, "
+        "clara.zrenner@example.com, +491701234567."
+    )
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="Oeffentliche Recherche",
+            body=body,
+            assignee="research",
+        )
+        context = kb.build_worker_context(conn, task_id)
+
+    assert body in context
+
+
+def test_price_worker_context_pseudonymizes_offer_recipient_name(kanban_home):
+    """A named offer recipient is PII even without phone or email context."""
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="Angebot fuer Max Mustermann erstellen",
+            body="Bitte ein Angebot fuer Max Mustermann vorbereiten.",
+            assignee="preis",
+        )
+        context = kb.build_worker_context(conn, task_id)
+
+    assert "Max Mustermann" not in context
+    assert "[PERSON_1]" in context
+
+
+def test_price_worker_context_handles_0049_phone_without_masking_company(kanban_home):
+    """A labeled 0049 number is PII; an uppercase company is not a person."""
+    body = "Telefon: 0049 30 1234567 fuer das Bauvorhaben der GESOBAU."
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="Preis fuer GESOBAU Neubau ermitteln",
+            body=body,
+            assignee="preis",
+        )
+        context = kb.build_worker_context(conn, task_id)
+
+    assert "0049 30 1234567" not in context
+    assert "[PHONE_1]" in context
+    assert "GESOBAU Neubau" in context
+
+
+def test_price_worker_context_pseudonymizes_uppercase_labeled_name(kanban_home):
+    """An explicit person label outweighs the uppercase-company heuristic."""
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="Kontakt pruefen",
+            body="Name: MAX MUSTERMANN",
+            assignee="preis",
+        )
+        context = kb.build_worker_context(conn, task_id)
+
+    assert "MAX MUSTERMANN" not in context
+    assert "[PERSON_1]" in context
+
+
 
 
 

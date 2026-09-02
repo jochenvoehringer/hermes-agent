@@ -122,3 +122,44 @@ def test_skips_own_authored_comments(worker_home, monkeypatch):
     _unthrottle()
     assert kt.inject_new_comments_from_env(agent) is False
     assert agent.steers == []
+
+
+def test_price_worker_pseudonymizes_comment_injected_mid_run(worker_home, monkeypatch):
+    """A live operator note must cross the same Preis privacy boundary."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="price task", assignee="preis")
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_PROFILE", "preis")
+    agent = FakeAgent()
+
+    _unthrottle()
+    kt.inject_new_comments_from_env(agent)
+
+    conn = kb.connect()
+    try:
+        kb.add_comment(
+            conn,
+            tid,
+            author="router",
+            body=(
+                "Kontakt: Clara Zrenner, clara.zrenner@example.com, "
+                "+491701234567"
+            ),
+        )
+    finally:
+        conn.close()
+
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is True
+    assert len(agent.steers) == 1
+    note = agent.steers[0]
+    assert "Clara Zrenner" not in note
+    assert "clara.zrenner@example.com" not in note
+    assert "+491701234567" not in note
+    assert "[PERSON_1]" in note
+    assert "[EMAIL_1]" in note
+    assert "[PHONE_1]" in note
