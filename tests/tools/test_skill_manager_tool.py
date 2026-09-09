@@ -210,6 +210,45 @@ class TestEditSkill:
         assert "A test skill" in content
 
 class TestPatchSkill:
+    def test_patch_symlinked_skill_updates_canonical_source(self, tmp_path, monkeypatch):
+        source = tmp_path / "repo" / "my-skill"
+        source.mkdir(parents=True)
+        skill_md = source / "SKILL.md"
+        skill_md.write_text(VALID_SKILL_CONTENT)
+        skills = tmp_path / "profile" / "skills"
+        skills.mkdir(parents=True)
+        link = skills / "my-skill"
+        link.symlink_to(source, target_is_directory=True)
+
+        monkeypatch.setenv("HERMES_HOME", str(skills.parent))
+        from tools.skills_tool import skill_view
+
+        assert json.loads(skill_view("my-skill", preprocess=False))["success"] is True
+        result = json.loads(skill_manage(
+            action="patch", name="my-skill",
+            old_string="Do the thing.", new_string="Do the new thing.",
+        ))
+
+        assert result["success"] is True, result
+        assert "Do the new thing." in skill_md.read_text()
+        assert link.is_symlink()
+
+    def test_other_profile_hint_finds_symlinked_skill(self, tmp_path, monkeypatch):
+        from tools.skill_manager_tool import _find_skill_in_other_profiles
+
+        root = tmp_path / "hermes"
+        source = tmp_path / "repo" / "my-skill"
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text(VALID_SKILL_CONTENT)
+        skills = root / "profiles" / "router" / "skills"
+        skills.mkdir(parents=True)
+        link = skills / "my-skill"
+        link.symlink_to(source, target_is_directory=True)
+        monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: root)
+
+        with _skill_dir(root / "skills"):
+            assert _find_skill_in_other_profiles("my-skill") == [("router", link)]
+
     def test_patch_unique_match(self, tmp_path):
         with _skill_dir(tmp_path):
             _create_skill("my-skill", VALID_SKILL_CONTENT)
