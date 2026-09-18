@@ -10958,16 +10958,40 @@ def _notification_poller_loop(
                         _batch = list(_pending)
                         session["_kanban_pending"] = []
                 if _batch:
-                    rid = f"__notif__{int(time.time() * 1000)}"
+                    # Das Ergebnis ist eine Antwort, keine Frage. Frueher ging
+                    # es durch _run_prompt_submit -- also denselben Weg, den
+                    # eine Eingabe des Nutzers nimmt. Der Agent hielt es dann
+                    # fuer eine Frage und antwortete darauf: ein voller
+                    # Modelldurchlauf je Karte, und die erfundene
+                    # Nutzeraeusserung blieb dauerhaft im Verlauf und ging in
+                    # jeden Folgeturn als Kontext ein (01.-03.09.2026 an
+                    # t_cbfc7bcc und t_c933847f mit bytegleichen Paaren
+                    # 395/395 und 367/367 belegt). Der HOPPE-Zusteller macht
+                    # es fuer die App seit jeher richtig; der Desktop folgt.
+                    _kb_answer = "\n".join(_batch)
                     try:
                         _emit("message.start", sid)
-                        _run_prompt_submit(rid, sid, session, "\n".join(_batch))
+                        with _session_db(session) as _kb_db:
+                            if _kb_db is None:
+                                raise RuntimeError(
+                                    "kanban delivery persistence unavailable"
+                                )
+                            _kb_db.append_messages_batch(
+                                session["session_key"],
+                                [{"role": "assistant", "content": _kb_answer}],
+                            )
+                        with session["history_lock"]:
+                            session.setdefault("history", []).append(
+                                {"role": "assistant", "content": _kb_answer}
+                            )
+                        _emit("message.complete", sid, {"text": _kb_answer})
                     except Exception as exc:
                         print(
-                            f"[tui_gateway] kanban notification dispatch failed: "
+                            f"[tui_gateway] kanban notification delivery failed: "
                             f"{type(exc).__name__}: {exc}",
                             file=sys.stderr,
                         )
+                    finally:
                         with session["history_lock"]:
                             session["running"] = False
         try:
