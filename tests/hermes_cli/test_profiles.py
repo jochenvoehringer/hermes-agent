@@ -25,6 +25,7 @@ from hermes_cli.profiles import (
     get_profile_dir,
     create_profile,
     delete_profile,
+    list_profile_names,
     list_profiles,
     set_active_profile,
     get_active_profile,
@@ -238,6 +239,8 @@ class TestBackfillProfileEnvs:
         # Simulate pre-#44792 profiles: no .env
         (p1 / ".env").unlink()
         (p2 / ".env").unlink()
+        (p1 / "config.yaml").write_text("model: old1\n")
+        (p2 / "config.yaml").write_text("model: old2\n")
 
         backfilled = backfill_profile_envs(quiet=True)
 
@@ -250,6 +253,7 @@ class TestBackfillProfileEnvs:
     def test_placeholder_when_default_has_no_env(self, profile_env):
         p = create_profile("noroot", no_alias=True)
         (p / ".env").unlink()
+        (p / "config.yaml").write_text("model: old\n")
 
         backfilled = backfill_profile_envs(quiet=True)
 
@@ -262,6 +266,16 @@ class TestBackfillProfileEnvs:
 
     def test_no_profiles_root_is_noop(self, profile_env):
         assert backfill_profile_envs(quiet=True) == []
+
+    def test_ignores_runtime_placeholder_directory(self, profile_env):
+        profiles_root = profile_env / ".hermes" / "profiles"
+        placeholder = profiles_root / "preisiso"
+        (placeholder / "cron").mkdir(parents=True)
+        (placeholder / "SOUL.md").write_text("runtime placeholder\n")
+        (placeholder / "cron" / "ticker_heartbeat").write_text("1\n")
+
+        assert backfill_profile_envs(quiet=True) == []
+        assert not (placeholder / ".env").exists()
 
 
 # ===================================================================
@@ -488,6 +502,31 @@ class TestListProfiles:
         names = [p.name for p in profiles]
         assert "alpha" in names
         assert "beta" in names
+
+    def test_excludes_runtime_placeholder_directory(self, profile_env):
+        placeholder = profile_env / ".hermes" / "profiles" / "preisrequesty"
+        (placeholder / "cron").mkdir(parents=True)
+        (placeholder / "SOUL.md").write_text("runtime placeholder\n")
+        (placeholder / "cron" / "ticker_heartbeat").write_text("1\n")
+
+        assert "preisrequesty" not in list_profile_names()
+        assert "preisrequesty" not in {profile.name for profile in list_profiles()}
+
+    @pytest.mark.parametrize(
+        ("name", "marker"),
+        [
+            ("legacy-config", "config.yaml"),
+            ("legacy-env", ".env"),
+            ("legacy-meta", "profile.yaml"),
+        ],
+    )
+    def test_recognizes_each_profile_marker(self, profile_env, name, marker):
+        profile_dir = profile_env / ".hermes" / "profiles" / name
+        profile_dir.mkdir(parents=True)
+        (profile_dir / marker).write_text("{}\n")
+
+        assert profile_dir.name in list_profile_names()
+        assert profile_dir.name in {profile.name for profile in list_profiles()}
 
 
 # ===================================================================
@@ -1065,6 +1104,13 @@ class TestProfilesToServe:
         assert serve["default"] == _get_default_hermes_home()
         assert serve["coder"] == get_profile_dir("coder")
 
+    def test_multiplex_excludes_runtime_placeholder_directory(self, profile_env):
+        placeholder = profile_env / ".hermes" / "profiles" / "preisiso"
+        (placeholder / "cron").mkdir(parents=True)
+        (placeholder / "cron" / "ticker_heartbeat").write_text("1\n")
+
+        assert "preisiso" not in dict(profiles_to_serve(multiplex=True))
+
     def test_empty_allowlist_serves_only_default(self, profile_env):
         create_profile("worker", no_alias=True)
 
@@ -1135,5 +1181,3 @@ class TestResolveProfileEnvSpelling:
         # No HERMES_HOME: the platform default root applies (existing contract).
         monkeypatch.delenv("HERMES_HOME", raising=False)
         assert Path(resolve_profile_env("default")) == _get_default_hermes_home()
-
-

@@ -39,6 +39,21 @@ logger = logging.getLogger(__name__)
 
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _WARNED_MISSING_ALLOWLIST_ENTRIES: set[tuple[str, ...]] = set()
+_PROFILE_MARKER_FILES = ("config.yaml", ".env", "profile.yaml")
+
+
+def _is_managed_profile_dir(path: Path) -> bool:
+    """Return whether *path* contains persistent Hermes profile state.
+
+    Runtime workers may create a directory containing only logs, locks, or
+    cron heartbeat files.  Those directories are not profiles and must not be
+    exposed by the CLI or multiplex gateway.  Existing profiles always have at
+    least one durable marker, including profiles created before per-profile
+    ``.env`` seeding.
+    """
+    return path.is_dir() and any(
+        (path / marker).is_file() for marker in _PROFILE_MARKER_FILES
+    )
 
 # Directories bootstrapped inside every new profile
 _PROFILE_DIRS = [
@@ -431,7 +446,11 @@ def list_profile_names() -> List[str]:
     try:
         if profiles_root.is_dir():
             for entry in sorted(profiles_root.iterdir()):
-                if entry.is_dir() and entry.name != "default" and _PROFILE_ID_RE.match(entry.name):
+                if (
+                    _is_managed_profile_dir(entry)
+                    and entry.name != "default"
+                    and _PROFILE_ID_RE.match(entry.name)
+                ):
                     names.append(entry.name)
     except OSError:
         pass
@@ -1015,7 +1034,7 @@ def list_profiles() -> List[ProfileInfo]:
         # wrapper dir each time — O(N*M), the dominant cost in this function).
         alias_map = build_alias_map()
         for entry in sorted(profiles_root.iterdir()):
-            if not entry.is_dir():
+            if not _is_managed_profile_dir(entry):
                 continue
             name = entry.name
             if name == "default":
@@ -1100,7 +1119,7 @@ def profiles_to_serve(
     profiles_root = _get_profiles_root()
     if profiles_root.is_dir():
         for entry in sorted(profiles_root.iterdir()):
-            if not entry.is_dir():
+            if not _is_managed_profile_dir(entry):
                 continue
             name = entry.name
             if name == "default":
@@ -1381,7 +1400,7 @@ def backfill_profile_envs(quiet: bool = False) -> List[str]:
     default_env = _get_default_hermes_home() / ".env"
 
     for entry in sorted(profiles_root.iterdir()):
-        if not entry.is_dir() or not _PROFILE_ID_RE.match(entry.name):
+        if not _is_managed_profile_dir(entry) or not _PROFILE_ID_RE.match(entry.name):
             continue
         if entry.name == "default":
             continue
