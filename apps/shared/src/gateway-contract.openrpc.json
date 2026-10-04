@@ -28320,6 +28320,18 @@
             "default": null,
             "title": "Session Key"
           },
+          "required_prompt_handler": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Required Prompt Handler"
+          },
           "messages_omitted": {
             "anyOf": [
               {
@@ -29871,6 +29883,18 @@
           },
           "info": {
             "$ref": "#/components/schemas/SessionLiveInfo"
+          },
+          "required_prompt_handler": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Required Prompt Handler"
           }
         },
         "required": [
@@ -31361,6 +31385,18 @@
             ],
             "default": null,
             "title": "Session Key"
+          },
+          "required_prompt_handler": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Required Prompt Handler"
           },
           "messages_omitted": {
             "anyOf": [

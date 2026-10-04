@@ -2968,6 +2968,7 @@ export interface SessionCreateResult {
   message_count: number
   messages: TranscriptMessage[]
   info: SessionLiveInfo
+  required_prompt_handler?: string | null
 }
 /** One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``): ``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id`` rewind targets, and for tool rows raw ``content``, ``tool_call_id``, ``name``, ``context`` and ``args``. Assistant detail sidecars (``reasoning``, …) ride as extra keys. */
 export interface TranscriptMessage {
@@ -3035,6 +3036,7 @@ export interface SessionResumeResult {
   stored_session_id?: string | null
   resumed?: string | null
   session_key?: string | null
+  required_prompt_handler?: string | null
   messages_omitted?: boolean | null
   hydrating?: boolean | null
   running?: boolean | null
@@ -3105,6 +3107,7 @@ export interface SessionActivateResult {
   stored_session_id?: string | null
   resumed?: string | null
   session_key?: string | null
+  required_prompt_handler?: string | null
   messages_omitted?: boolean | null
   hydrating?: boolean | null
   running?: boolean | null

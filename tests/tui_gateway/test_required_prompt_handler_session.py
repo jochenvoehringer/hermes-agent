@@ -78,6 +78,7 @@ def test_session_create_retains_normalized_required_prompt_handler(monkeypatch, 
     sid = response["result"]["session_id"]
     try:
         assert server._sessions[sid]["required_prompt_handler"] == "hoppe_ocr_approval"
+        assert response["result"]["required_prompt_handler"] == "hoppe_ocr_approval"
     finally:
         server._sessions.pop(sid, None)
 
@@ -104,6 +105,7 @@ def test_session_resume_retains_required_prompt_handler(monkeypatch, tmp_path, r
 
     sid = response["result"]["session_id"]
     assert server._sessions[sid]["required_prompt_handler"] == "hoppe_ocr_approval"
+    assert response["result"]["required_prompt_handler"] == "hoppe_ocr_approval"
 
 
 def test_live_session_resume_refreshes_required_prompt_handler(monkeypatch, tmp_path):
@@ -126,6 +128,7 @@ def test_live_session_resume_refreshes_required_prompt_handler(monkeypatch, tmp_
 
     assert response["result"]["session_id"] == "live-ios-ui"
     assert record["required_prompt_handler"] == "hoppe_ocr_approval"
+    assert response["result"]["required_prompt_handler"] == "hoppe_ocr_approval"
 
 
 def test_eager_session_constructor_retains_required_prompt_handler(monkeypatch, tmp_path):

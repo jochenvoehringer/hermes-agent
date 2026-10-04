@@ -1,6 +1,88 @@
 """Behavior contract for the TUI pre-prompt plugin dispatch gate."""
 
+import contextlib
+import threading
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
+
+from tui_gateway import server
+
+
+class _InlineThread:
+    def __init__(self, target=None, daemon=None, args=(), kwargs=None, name=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        if self._target is not None:
+            self._target(*self._args, **self._kwargs)
+
+    def is_alive(self):
+        return False
+
+    def join(self, timeout=None):
+        return None
+
+
+class _RecordingDB:
+    def __init__(self):
+        self.batches = []
+
+    def append_messages_batch(self, session_id, messages, **_kwargs):
+        self.batches.append((session_id, [dict(message) for message in messages]))
+        for index, message in enumerate(messages, 1):
+            message["_row_id"] = 100 + index
+        return len(messages)
+
+
+def _worker_session(agent, image_path):
+    return {
+        "agent": agent,
+        "session_key": "stored-ios",
+        "source": "ios",
+        "required_prompt_handler": "hoppe_ocr_approval",
+        "history": [],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "running": True,
+        "attached_images": [str(image_path)],
+        "image_counter": 1,
+        "cols": 80,
+        "slash_worker": None,
+        "show_reasoning": False,
+        "tool_progress_mode": "all",
+        "inflight_turn": None,
+    }
+
+
+@pytest.fixture()
+def worker_env(monkeypatch, tmp_path):
+    events = []
+    monkeypatch.setattr(server.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(server, "_emit", lambda name, sid, payload=None: events.append((name, sid, payload)))
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda _session: True)
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_args: None)
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
+    monkeypatch.setattr(server, "_apply_pending_model_switch", lambda *_args: None)
+    monkeypatch.setattr(server, "_sync_agent_model_with_config", lambda *_args: None)
+    monkeypatch.setattr(server, "_sync_agent_compression_with_config", lambda *_args: None)
+    monkeypatch.setattr(server, "_sync_agent_fallback_with_config", lambda *_args: None)
+    monkeypatch.setattr(server, "_sync_bot_capabilities", lambda *_args: None)
+    monkeypatch.setattr(server, "_adopt_out_of_band_turns", lambda *_args: None)
+    monkeypatch.setattr(server, "_stage_first_contact_onboarding_note", lambda *_args: None)
+    monkeypatch.setattr(server, "_session_cwd", lambda _session: str(tmp_path))
+    monkeypatch.setattr(server, "_register_session_cwd", lambda _session: None)
+    monkeypatch.setattr(server, "_start_turn_voice", lambda: (None, False))
+    monkeypatch.setattr(server, "_record_turn_marker", lambda *_args, **_kwargs: "stored-ios")
+    monkeypatch.setattr(server, "_retire_turn_marker", lambda *_args: None)
+    monkeypatch.setattr(server, "_emit_settled_session_info", lambda *_args: None)
+    monkeypatch.setattr(server, "_post_turn_housekeeping", lambda *_args: None)
+    monkeypatch.setattr(server, "_get_usage", lambda _agent: {})
+    monkeypatch.setattr(server, "_routing_provenance_db", lambda _session: contextlib.nullcontext(None))
+    return events
 
 
 def test_pre_prompt_dispatch_is_a_public_plugin_hook():
@@ -194,3 +276,68 @@ def test_hook_dispatch_failure_blocks_only_required_image_turn(monkeypatch):
 
     assert blocked.action == "block"
     assert allowed.action == "allow"
+
+
+def test_worker_uses_matching_hook_response_without_agent(monkeypatch, tmp_path, worker_env):
+    """A plugin response must be durable and close the turn before model work."""
+    from tui_gateway.prompt_dispatch_hooks import PromptDispatchDecision
+
+    image_path = tmp_path / "contact.png"
+    image_path.write_bytes(b"image")
+    db = _RecordingDB()
+    calls = []
+
+    def run_agent(*_args, **_kwargs):
+        calls.append(("agent", {}))
+        return {"final_response": "wrong path", "messages": []}
+
+    agent = SimpleNamespace(
+        session_id="stored-ios",
+        _session_db=db,
+        clear_interrupt=lambda: None,
+        run_conversation=run_agent,
+    )
+    session = _worker_session(agent, image_path)
+    monkeypatch.setattr(
+        server,
+        "invoke_pre_prompt_dispatch",
+        lambda **kwargs: (
+            calls.append(("hook", kwargs)),
+            PromptDispatchDecision(
+                action="respond",
+                handler="hoppe_ocr_approval",
+                text="Freigabe angelegt",
+                reason="ocr_approval_created",
+            ),
+        )[1],
+        raising=False,
+    )
+
+    assert server._run_prompt_submit("rid", "ios-ui", session, "Kontakt prüfen")
+
+    assert [kind for kind, *_rest in calls] == ["hook"]
+    assert calls[0][1]["attached_images"] == [str(image_path)]
+    assert session["history"] == [
+        {
+            "role": "user",
+            "content": f"Kontakt prüfen\n@image:{image_path}",
+            "_row_id": 101,
+            "_db_persisted": True,
+        },
+        {
+            "role": "assistant",
+            "content": "Freigabe angelegt",
+            "_row_id": 102,
+            "_db_persisted": True,
+        },
+    ]
+    assert db.batches == [("stored-ios", [
+        {"role": "user", "content": f"Kontakt prüfen\n@image:{image_path}"},
+        {"role": "assistant", "content": "Freigabe angelegt"},
+    ])]
+    assert [event[0] for event in worker_env] == [
+        "message.start",
+        "message.delta",
+        "message.complete",
+    ]
+    assert worker_env[-1][2]["status"] == "complete"

@@ -81,6 +81,7 @@ class LiveSessionSnapshot(Result):
     stored_session_id: str | None = None
     resumed: str | None = None
     session_key: str | None = None
+    required_prompt_handler: str | None = None
     messages_omitted: bool | None = None
     hydrating: bool | None = None
     running: bool | None = None
@@ -146,6 +147,7 @@ class SessionCreateResult(Result):
     message_count: int
     messages: list[TranscriptMessage]
     info: SessionLiveInfo
+    required_prompt_handler: str | None = None
 
 
 method("session.create", params=SessionCreateParams, result=SessionCreateResult,

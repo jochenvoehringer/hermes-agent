@@ -807,6 +807,68 @@ def _invoke_agent(
         _usage_thread.join()
 
 
+def _complete_prompt_dispatch_response(
+    sid: str,
+    session: dict,
+    st: _TurnRun,
+    *,
+    user_text: Any,
+    images: list[str],
+    response_text: str,
+    display_kind: str | None = None,
+    display_metadata: dict | None = None,
+) -> dict:
+    """Persist a plugin-owned response and commit it without invoking the agent."""
+    from agent.context_compressor import _DB_PERSISTED_MARKER
+    from agent.session_persistence import _durable_content
+
+    clean_user_text = user_text if isinstance(user_text, str) else str(user_text)
+    persisted_user = _build_persist_message_with_image_refs(clean_user_text, images)
+    fresh_user: dict[str, Any] = {"role": "user", "content": persisted_user}
+    if display_kind:
+        fresh_user["display_kind"] = display_kind
+        if display_metadata:
+            fresh_user["display_metadata"] = display_metadata
+    assistant_entry = {"role": "assistant", "content": response_text}
+
+    db = getattr(st.agent, "_session_db", None)
+    db_context = contextlib.nullcontext(db) if db is not None else _session_db(session)
+    with db_context as scoped_db:
+        if scoped_db is None:
+            raise RuntimeError("prompt dispatch response persistence unavailable")
+        with session["history_lock"]:
+            current_history = list(session.get("history") or [])
+            staged = session.pop("_submit_user_row", None)
+            staged_matches = isinstance(staged, dict) and staged.get("content") == clean_user_text
+            if staged_matches:
+                target = _submit_row_owner_key(staged, session)
+                if staged["content"] != persisted_user:
+                    scoped_db.set_user_message_content(
+                        target, staged["_row_id"], _durable_content(persisted_user))
+                    staged["content"] = persisted_user
+                user_entry = staged
+                pending = [assistant_entry]
+            else:
+                target = str(session.get("session_key") or sid)
+                user_entry = fresh_user
+                pending = [user_entry, assistant_entry]
+            scoped_db.append_messages_batch(target, pending)
+            for message in pending:
+                message[_DB_PERSISTED_MARKER] = True
+            messages = [user_entry, assistant_entry]
+            session["history"] = [*current_history, *messages]
+            session["history_version"] = int(session.get("history_version", 0)) + 1
+            _clear_inflight_turn(session)
+
+    if response_text:
+        _emit("message.delta", sid, {"text": response_text})
+    return {
+        "final_response": response_text,
+        "messages": session["history"],
+        "prompt_dispatch_response": True,
+    }
+
+
 def _absorb_turn_result(
     sid: str, session: dict, st: _TurnRun, text: Any, display_kind: str | None, display_metadata
 ) -> str | None:
@@ -1173,19 +1235,42 @@ def _run_prompt_submit(
                     st.receipt_committed = True
                 return
             prompt, run_message, cols, streamer = prepared
-            _invoke_agent(
-                sid, session, st, prompt, run_message, streamer, images, display_kind,
-                display_metadata, turn_author, text)
-            status_note = _absorb_turn_result(
-                sid, session, st, text, display_kind, display_metadata)
+            dispatch_decision = invoke_pre_prompt_dispatch(
+                session_id=sid,
+                session_key=session.get("session_key") or sid,
+                source=_session_source(session),
+                text=text,
+                attached_images=images,
+                required_prompt_handler=session.get("required_prompt_handler"),
+            )
+            prompt_dispatch_response = dispatch_decision.action in {"respond", "block"}
+            if prompt_dispatch_response:
+                st.result = _complete_prompt_dispatch_response(
+                    sid,
+                    session,
+                    st,
+                    user_text=text,
+                    images=images,
+                    response_text=dispatch_decision.text,
+                    display_kind=display_kind,
+                    display_metadata=display_metadata,
+                )
+                status_note = None
+            else:
+                _invoke_agent(
+                    sid, session, st, prompt, run_message, streamer, images, display_kind,
+                    display_metadata, turn_author, text)
+                status_note = _absorb_turn_result(
+                    sid, session, st, text, display_kind, display_metadata)
             payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
             _emit("message.complete", sid, payload)
-            goal_followup = _goal_followup_after_turn(sid, session, st.result, status, raw)
-            if status == "complete":
-                _after_complete_turn(sid, session, st, raw)
-            # Goal judge + loop tick evaluation mutate persisted state AFTER message.complete: publish the
-            # structured control snapshot now so the Desktop card never paints the pre-judge turn count.
-            _publish_session_control_snapshot(sid, session, only_if_present=True)
+            if not prompt_dispatch_response:
+                goal_followup = _goal_followup_after_turn(sid, session, st.result, status, raw)
+                if status == "complete":
+                    _after_complete_turn(sid, session, st, raw)
+                # Goal judge + loop tick evaluation mutate persisted state AFTER message.complete: publish the
+                # structured control snapshot now so the Desktop card never paints the pre-judge turn count.
+                _publish_session_control_snapshot(sid, session, only_if_present=True)
         except Exception as e:
             _recover_turn_exception(sid, session, st, e)
         finally:
