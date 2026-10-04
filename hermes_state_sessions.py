@@ -9,7 +9,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from agent.session_activity import (
     ActivityProvenance, bound_activity_description, normalize_activity_provenance,
@@ -1696,50 +1696,73 @@ class SessionSessionsMixin:
             self._remove_session_files(sessions_dir, session_id)
         return deleted
 
+    def _delete_sessions_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        session_ids: Iterable[str],
+        *,
+        expected_delete_ids: Optional[Iterable[str]] = None,
+        exclude_active_write_guards: bool = False,
+        skipped_ids: Optional[List[str]] = None,
+    ) -> Tuple[int, List[str]]:
+        """Delete targets using an already-open write transaction."""
+        unique_ids = sorted(
+            {sid for sid in session_ids or () if isinstance(sid, str) and sid}
+        )
+        if not unique_ids:
+            return 0, []
+        existing = [row["id"] for chunk in _id_chunks(unique_ids) for row in conn.execute(
+            f"SELECT id FROM sessions WHERE id IN ({_session_ids_placeholders(chunk)})", chunk,
+        ).fetchall()]
+        if not existing:
+            return 0, []
+        if exclude_active_write_guards:
+            active_ids: set = set()
+            if self._guarded_ids(conn, [*existing, *_collect_delegate_child_ids(conn, existing)]):
+                active_ids = {
+                    sid for sid in existing
+                    if self._guarded_ids(conn, [sid, *_collect_delegate_child_ids(conn, [sid])])
+                }
+            existing = [sid for sid in existing if sid not in active_ids]
+            if skipped_ids is not None:
+                skipped_ids.extend(sorted(active_ids))
+            if not existing:
+                return 0, []
+        delegate_ids = sorted(_collect_delegate_child_ids(conn, existing))
+        actual_delete_ids = set(existing) | set(delegate_ids)
+        if expected_delete_ids is not None and actual_delete_ids != set(expected_delete_ids):
+            return 0, []
+        removed_delegate_ids = _delete_delegate_children(conn, existing)
+        for chunk in _id_chunks(existing):
+            ph = _session_ids_placeholders(chunk)
+            conn.execute(
+                f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk,
+            )
+            conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
+            conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
+        self._delete_unreferenced_system_prompts(conn)
+        return len(existing), [*existing, *removed_delegate_ids]
+
     def delete_sessions(
         self, session_ids: List[str], sessions_dir: Optional[Path] = None,
         exclude_active_write_guards: bool = False, skipped_ids: Optional[List[str]] = None,
+        expected_delete_ids: Optional[Iterable[str]] = None,
     ) -> int:
         """Bulk delete with :meth:`delete_session` semantics per row, in ONE transaction. Unknown ids
         are skipped (UI selection can race another tab's delete). With ``exclude_active_write_guards``,
         rows protected by an active turn lease or compression lock are skipped and, when given, appended
         to ``skipped_ids`` so callers can tell the user. Returns the number deleted."""
-        unique_ids = list({sid for sid in session_ids or () if isinstance(sid, str) and sid})
-        if not unique_ids:
-            return 0
         removed_ids: list[str] = []
         def _do(conn):
-            existing = [row["id"] for chunk in _id_chunks(unique_ids) for row in conn.execute(
-                f"SELECT id FROM sessions WHERE id IN ({_session_ids_placeholders(chunk)})", chunk,
-            ).fetchall()]
-            if not existing:
-                return 0
-            if exclude_active_write_guards:
-                # A root is skipped when it or any delegate child it would cascade is guarded, so the
-                # cascade below never deletes a guarded row reported back as kept.
-                # One batched check first; per-root attribution only when something is guarded.
-                active_ids: set = set()
-                if self._guarded_ids(conn, [*existing, *_collect_delegate_child_ids(conn, existing)]):
-                    active_ids = {
-                        sid for sid in existing
-                        if self._guarded_ids(conn, [sid, *_collect_delegate_child_ids(conn, [sid])])
-                    }
-                existing = [sid for sid in existing if sid not in active_ids]
-                if skipped_ids is not None:
-                    skipped_ids.extend(sorted(active_ids))
-                if not existing:
-                    return 0
-            removed_ids.extend(_delete_delegate_children(conn, existing))
-            for chunk in _id_chunks(existing):
-                ph = _session_ids_placeholders(chunk)
-                conn.execute(  # orphan children whose parent is in the kill list (FK)
-                    f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk,
-                )
-                conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
-                conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
-            self._delete_unreferenced_system_prompts(conn)
-            removed_ids.extend(existing)
-            return len(existing)
+            count, deleted_ids = self._delete_sessions_on_conn(
+                conn,
+                session_ids,
+                expected_delete_ids=expected_delete_ids,
+                exclude_active_write_guards=exclude_active_write_guards,
+                skipped_ids=skipped_ids,
+            )
+            removed_ids.extend(deleted_ids)
+            return count
         count = self._execute_write(_do)
         for sid in removed_ids:
             self._remove_session_files(sessions_dir, sid)
