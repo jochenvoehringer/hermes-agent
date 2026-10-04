@@ -4,6 +4,25 @@ import os
 from hermes_cli.env_loader import load_hermes_dotenv
 
 
+def test_process_dashboard_session_token_survives_managed_overlay(tmp_path, monkeypatch):
+    import hermes_cli.env_loader as env_loader
+
+    home = tmp_path / "profile"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "process-token")
+    monkeypatch.setattr(
+        env_loader,
+        "_apply_managed_env",
+        lambda **_kwargs: os.environ.__setitem__(
+            "HERMES_DASHBOARD_SESSION_TOKEN", "stale-overlay-token"
+        ),
+    )
+
+    load_hermes_dotenv(hermes_home=home, load_external_secrets=False)
+
+    assert os.environ["HERMES_DASHBOARD_SESSION_TOKEN"] == "process-token"
+
+
 def test_recovered_update_retry_skips_external_secret_sources(tmp_path, monkeypatch):
     """The post-recovery updater must not remap native vault dependencies."""
     import hermes_cli.env_loader as env_loader

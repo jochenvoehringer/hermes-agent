@@ -381,6 +381,12 @@ def _apply_ssh_session_token(token: str) -> None:
         _SESSION_TOKEN = token
 
 
+def _apply_startup_session_token(ssh_session_token: Optional[str]) -> None:
+    """Reconcile the auth token at listen time after all bootstrap paths ran."""
+    token = ssh_session_token or os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN", "")
+    _apply_ssh_session_token(token)
+
+
 def _apply_ssh_owner_nonce(nonce: Optional[str]) -> None:
     global _SSH_OWNER_NONCE, _SSH_RUNTIME_PURELIB, _SSH_RUNTIME_MARKER
     _SSH_OWNER_NONCE = nonce
@@ -1551,7 +1557,7 @@ def start_server(
     until the ready sentinel is written so its SDK import can't hold the GIL
     against the pre-bind path.
     """
-    _apply_ssh_session_token(ssh_session_token or "")
+    _apply_startup_session_token(ssh_session_token)
     _apply_ssh_owner_nonce(ssh_owner_nonce)
 
     # Dashboard-mode starts don't route through main.py's `serve` path, which

@@ -494,6 +494,9 @@ def load_hermes_dotenv(
         return []
 
     loaded: list[Path] = []
+    # The launcher owns this per-process pairing token. Persistent profile
+    # configuration and managed overlays must not replace the current launch.
+    process_dashboard_session_token = os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN")
     user_env = home_path / ".env"
     project_env_path = Path(project_env) if project_env else None
     load_pass = next(_DOTENV_PASSES)  # one pass: later layers below see the earlier layers' output
@@ -555,6 +558,9 @@ def load_hermes_dotenv(
     # cron standalone runs) call load_hermes_dotenv() repeatedly and used to flip the effective backend back
     # to the stale .env value mid-session (#29186, #67323).
     _reapply_terminal_config_bridge(home_path)
+
+    if process_dashboard_session_token is not None:
+        os.environ["HERMES_DASHBOARD_SESSION_TOKEN"] = process_dashboard_session_token
 
     return loaded
 
