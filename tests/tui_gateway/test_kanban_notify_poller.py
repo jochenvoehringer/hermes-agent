@@ -258,20 +258,32 @@ class TestNotificationPollerLoopKanbanWiring:
     busy-session pending buffer that flushes once the session goes idle.
     """
 
-    def _start_poller(self, session: dict, monkeypatch):
+    def _start_poller(self, session: dict, monkeypatch, *, session_db=None):
+        import contextlib
         import threading
         import tui_gateway.server as server
 
         emits: list = []
         submits: list = []
+        persisted: list = []
+
+        class _RecordingDB:
+            def append_messages_batch(self, session_key, messages):
+                persisted.append((session_key, messages))
+
+        @contextlib.contextmanager
+        def _recording_session_db(_session):
+            yield _RecordingDB()
+
         monkeypatch.setattr(server, "_KANBAN_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(server, "_session_db", session_db or _recording_session_db)
         monkeypatch.setattr(
             server, "_emit", lambda event, sid, payload=None: emits.append((event, payload))
         )
         monkeypatch.setattr(
             server,
             "_run_prompt_submit",
-            lambda rid, sid, sess, text: submits.append(text),
+            lambda rid, sid, sess, text, **kwargs: submits.append(text),
         )
         stop = threading.Event()
         thread = threading.Thread(
@@ -280,7 +292,7 @@ class TestNotificationPollerLoopKanbanWiring:
             daemon=True,
         )
         thread.start()
-        return stop, thread, emits, submits
+        return stop, thread, emits, submits, persisted
 
     @staticmethod
     def _wait_for(predicate, timeout: float = 5.0) -> bool:
@@ -302,14 +314,14 @@ class TestNotificationPollerLoopKanbanWiring:
             "running": running,
         }
 
-    def test_idle_session_gets_status_update_and_agent_turn(self, monkeypatch):
+    def test_idle_session_gets_status_update_and_assistant_message(self, monkeypatch):
         tid = _create_subscribed_task()
         _complete(tid, summary="poller e2e done")
         session = self._poller_session(running=False)
 
-        stop, thread, emits, submits = self._start_poller(session, monkeypatch)
+        stop, thread, emits, submits, persisted = self._start_poller(session, monkeypatch)
         try:
-            assert self._wait_for(lambda: submits), "agent turn was never dispatched"
+            assert self._wait_for(lambda: persisted), "answer was never persisted"
         finally:
             stop.set()
             thread.join(timeout=5)
@@ -317,8 +329,13 @@ class TestNotificationPollerLoopKanbanWiring:
         status_texts = [p["text"] for e, p in emits if e == "status.update" and p]
         assert any(tid in t for t in status_texts), status_texts
         assert any(e == "message.start" for e, _ in emits)
-        assert any(tid in text for text in submits), submits
-        assert session["running"] is True  # poller claimed the turn
+        assert any(tid in p["text"] for e, p in emits if e == "message.complete" and p)
+        assert persisted[0][0] == SESSION_KEY
+        assert persisted[0][1][0]["role"] == "assistant"
+        assert tid in persisted[0][1][0]["content"]
+        assert session["history"][-1]["role"] == "assistant"
+        assert submits == []  # never impersonate the user or spend another model turn
+        assert session["running"] is False
         assert not session.get("_kanban_pending")
 
     def test_busy_session_buffers_then_flushes_when_idle(self, monkeypatch):
@@ -326,7 +343,7 @@ class TestNotificationPollerLoopKanbanWiring:
         _complete(tid, summary="buffered while busy")
         session = self._poller_session(running=True)
 
-        stop, thread, emits, submits = self._start_poller(session, monkeypatch)
+        stop, thread, emits, submits, persisted = self._start_poller(session, monkeypatch)
         try:
             # Busy: the status line appears and the event is buffered, but no
             # agent turn is dispatched while another turn is running.
@@ -334,16 +351,40 @@ class TestNotificationPollerLoopKanbanWiring:
                 lambda: any(e == "status.update" for e, _ in emits)
                 and session.get("_kanban_pending")
             )
-            assert not submits
+            assert not persisted
 
             with session["history_lock"]:
                 session["running"] = False
 
-            assert self._wait_for(lambda: submits), "pending batch never flushed"
+            assert self._wait_for(lambda: persisted), "pending batch never flushed"
         finally:
             stop.set()
             thread.join(timeout=5)
 
-        assert any(tid in text for text in submits), submits
+        assert tid in persisted[0][1][0]["content"]
+        assert submits == []
         assert session["_kanban_pending"] == []
-        assert session["running"] is True
+        assert session["running"] is False
+
+    def test_failed_persistence_releases_the_turn(self, monkeypatch):
+        import contextlib
+
+        tid = _create_subscribed_task()
+        _complete(tid, summary="persistence is down")
+        session = self._poller_session(running=False)
+
+        @contextlib.contextmanager
+        def _no_db(_session):
+            yield None
+
+        stop, thread, emits, submits, persisted = self._start_poller(
+            session, monkeypatch, session_db=_no_db)
+        try:
+            assert self._wait_for(lambda: any(e == "message.start" for e, _ in emits))
+        finally:
+            stop.set()
+            thread.join(timeout=5)
+        assert persisted == []
+        assert not any(e == "message.complete" for e, _ in emits)
+        assert session["running"] is False
+        assert submits == []

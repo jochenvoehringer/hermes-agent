@@ -452,10 +452,22 @@ def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
         diagnostic = split and isinstance(pending[0], DiagnosticText)
         batch = [text for text in pending if not split or isinstance(text, DiagnosticText) == diagnostic]
         session["_kanban_pending"] = [text for text in pending if split and isinstance(text, DiagnosticText) != diagnostic]
-    with contextlib.suppress(Exception):
-        _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(batch),
-                      "kanban notification dispatch failed",
-                      **({"display_metadata": {"notification_category": "diagnostic"}} if diagnostic else {}))
+    answer = "\n".join(batch)
+    try:
+        _emit("message.start", sid)
+        with _session_db(session) as db:
+            if db is None:
+                raise RuntimeError("kanban delivery persistence unavailable")
+            db.append_messages_batch(session["session_key"],
+                                     [{"role": "assistant", "content": answer}])
+        with session["history_lock"]:
+            session.setdefault("history", []).append({"role": "assistant", "content": answer})
+        _emit("message.complete", sid, {"text": answer,
+              **({"display_metadata": {"notification_category": "diagnostic"}} if diagnostic else {})})
+    except Exception as exc:
+        _notif_log_failure("kanban notification delivery failed", exc)
+    finally:
+        _notif_release_turn(session)
 
 
 def _background_notifications_off(session: dict) -> bool:
