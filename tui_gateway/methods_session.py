@@ -333,6 +333,9 @@ def _seed_row(record: dict) -> None:
 def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> dict:
     """``session.create``; ``copy_parent_history`` (``session.branch_stored``) reads the parent's
     transcript server-side and omits it from the reply."""
+    from .prompt_dispatch_hooks import normalize_required_prompt_handler
+
+    required_prompt_handler = normalize_required_prompt_handler(params.get("required_prompt_handler"))
     # ``profile`` (app-global remote mode): stored so the build and every turn re-bind HERMES_HOME.
     profile_home = _profile_home(profile := (params.get("profile") or "").strip() or None)
     # Reject an incoherent model×provider pair BEFORE any state exists: minting it only defers the
@@ -438,6 +441,7 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
             "pending_hidden": _flag(params, "hidden"), "room_plumbing": _flag(params, "room_plumbing"),
             "follow_profile_config": _flag(params, "follow_profile_config"),
             "profile_home": str(profile_home) if profile_home is not None else None,
+            "required_prompt_handler": required_prompt_handler,
             "running": False, "session_key": key, "show_reasoning": _load_show_reasoning(), "source": source,
             "slash_worker": None, "tool_progress_mode": _load_tool_progress_mode(), "tool_started_at": {},
             "transport": current_transport() or _stdio_transport,
@@ -628,6 +632,8 @@ class _Resume:
     inline_images = True  # class default so a ``__new__``-built ctx (tests) projects the full form
 
     def __init__(self, rid, params: dict, target: str) -> None:
+        from .prompt_dispatch_hooks import normalize_required_prompt_handler
+
         self.rid, self.params, self.target = rid, params, target
         self.db, self.owns_db, self.found, self.profile_resume_cwd = None, False, None, ""
         self.cols = _int_param(params, "cols", 80)
@@ -639,6 +645,7 @@ class _Resume:
         self.omit_messages, self.eager_build = _flag(params, "omit_messages"), _flag(params, "eager_build")
         # inline_images=False renders image parts as "[image]" (#116511); default keeps data URIs.
         self.inline_images = "inline_images" not in params or _flag(params, "inline_images")
+        self.required_prompt_handler = normalize_required_prompt_handler(params.get("required_prompt_handler"))
 
     def mint(self, prompts: bool = True) -> tuple:
         """``(runtime sid, source, cwd)`` for the live record this resume registers (+ gateway prompts on)."""
@@ -659,7 +666,8 @@ class _Resume:
         record = _deferred_session_record(
             self.target, cols=self.cols, cwd=cwd, history=history, lease=None, source=source,
             close_on_disconnect=_flag(self.params, "close_on_disconnect"),
-            profile_home=self.profile_home, explicit_cwd=bool(self.profile_resume_cwd), **extra)
+            profile_home=self.profile_home, explicit_cwd=bool(self.profile_resume_cwd),
+            required_prompt_handler=self.required_prompt_handler, **extra)
         if follows_profile:
             record.update(
                 follow_profile_config=True,
@@ -881,6 +889,7 @@ def _resume_reuse_live_locked(ctx: _Resume, sid: str, session: dict) -> dict:
     """Reuse with _session_resume_lock already held (including the eager double-check)."""
     if (refusal := _reattach_refusal(ctx.rid, sid, session)) is not None:
         return refusal
+    session["required_prompt_handler"] = ctx.required_prompt_handler
     _cancel_ws_orphan_reap(sid)  # unconditionally: the fast path must never race the reap Timer
     payload = _live_session_payload(sid, session, cols=ctx.cols, touch=True, omit_messages=ctx.omit_messages,
                                     transport=current_transport() or _stdio_transport,
@@ -1015,7 +1024,8 @@ def _resume_eager(ctx: _Resume) -> dict:
         try:
             with _profile_build_scope(ctx.profile_home):
                 _init_session(sid, ctx.target, agent, history, cols=ctx.cols, cwd=ctx.profile_resume_cwd,
-                              session_db=ctx.db, source=source, explicit_cwd=bool(ctx.profile_resume_cwd))
+                              session_db=ctx.db, source=source, explicit_cwd=bool(ctx.profile_resume_cwd),
+                              required_prompt_handler=ctx.required_prompt_handler)
                 # Ownership TRANSFER: the agent holds the handle for life (AIAgent.close() releases it). The
                 # owns_db drop is UNCONDITIONAL — the session is registered against the handle, so the finally
                 # must not close it even if the transfer was refused (a leak beats "closed database" every

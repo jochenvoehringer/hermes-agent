@@ -137,6 +137,7 @@ class SessionCreateParams(ProfileParams):
     # #65410: stable caller-chosen key so a retried create (response lost in
     # transit) returns the SAME session instead of a duplicate child.
     idempotency_key: str | None = None
+    required_prompt_handler: str | None = None
 
 
 class SessionCreateResult(Result):
@@ -192,6 +193,7 @@ class SessionResumeParams(SessionParams):
     # False: render image parts as "[image]" instead of their data URIs — a remote client reads a
     # transcript in kilobytes instead of re-transmitting every stored attachment (#116511).
     inline_images: bool = True
+    required_prompt_handler: str | None = None
 
 
 class SessionResumeResult(LiveSessionSnapshot):

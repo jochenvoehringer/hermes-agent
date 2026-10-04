@@ -2952,6 +2952,7 @@ export interface SessionCreateParams {
   room_plumbing?: boolean
   follow_profile_config?: boolean
   idempotency_key?: string | null
+  required_prompt_handler?: string | null
 }
 /** One create-time transcript row (``session_history._coerce_seed_history``); ``text`` is the legacy alias of ``content``; only ``display_kind: "hidden"`` is accepted from the wire. Clients forward stored rows verbatim (``_row_id``, ``timestamp``, …) and the coercer drops what it does not use, so the row stays open. */
 export interface SeedMessage {
@@ -3024,6 +3025,7 @@ export interface SessionResumeParams {
   eager_build?: boolean
   close_on_disconnect?: boolean
   inline_images?: boolean
+  required_prompt_handler?: string | null
 }
 export interface SessionResumeResult {
   session_id: string

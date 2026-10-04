@@ -2751,7 +2751,7 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
 def _init_session(
     sid: str, key: str, agent, history: list, cols: int = 80, cwd: str | None = None,
     session_db=None, source: str | None = None, profile_home: str | None = None,
-    explicit_cwd: bool = False):
+    explicit_cwd: bool = False, required_prompt_handler: str | None = None):
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
@@ -2763,6 +2763,7 @@ def _init_session(
             "tool_progress_mode": _load_tool_progress_mode(), "edit_snapshots": {}, "tool_started_at": {},
             # Profile-scoped HERMES_HOME (None = launch); SessionBranch copies the parent's (same state.db).
             "profile_home": profile_home,
+            "required_prompt_handler": required_prompt_handler,
             # In-session /model switch, honored on rebuild (/new, resume) — never leaks to siblings via env vars.
             "model_override": None,
             # Async events go to the transport that created the session (stdio for Ink, WS for the dashboard).
@@ -2844,7 +2845,7 @@ def _deferred_session_record(
     close_on_disconnect: bool = False, display_history_prefix: list | None = None,
     profile_home: Path | None = None, lazy: bool = False, model_override=None,
     resume_runtime_overrides: dict | None = None, todo_state: dict | None = None,
-    explicit_cwd: bool = False) -> dict:
+    explicit_cwd: bool = False, required_prompt_handler: str | None = None) -> dict:
     """A live-session record whose AIAgent is built later (lazy watch / cold resume) — _init_session's shape minus the agent."""
     now = time.time()
     return {
@@ -2856,6 +2857,7 @@ def _deferred_session_record(
         "inflight_turn": None, "last_active": now, "lazy": lazy, "model_override": model_override,
         "pending_title": None,
         "profile_home": str(profile_home) if profile_home is not None else None,
+        "required_prompt_handler": required_prompt_handler,
         "resume_runtime_overrides": resume_runtime_overrides, "resume_session_id": session_key,
         "running": False, "session_key": session_key, "show_reasoning": _load_show_reasoning(),
         "slash_worker": None, "source": source, "tool_progress_mode": _load_tool_progress_mode(),

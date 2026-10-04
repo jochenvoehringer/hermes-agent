@@ -29830,6 +29830,18 @@
             ],
             "default": null,
             "title": "Idempotency Key"
+          },
+          "required_prompt_handler": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Required Prompt Handler"
           }
         },
         "title": "SessionCreateParams",
@@ -31230,6 +31242,18 @@
             "default": true,
             "title": "Inline Images",
             "type": "boolean"
+          },
+          "required_prompt_handler": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Required Prompt Handler"
           }
         },
         "required": [
