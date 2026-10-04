@@ -22,10 +22,24 @@ def test_bulk_delete_sessiondb_work_runs_off_event_loop(monkeypatch):
     db_modes: list[bool] = []
 
     class _DB:
-        def delete_sessions(self, ids, **kwargs):
+        def resolve_session_id(self, sid):
+            db_threads.append(threading.get_ident())
+            return sid
+
+        def get_compression_conversation(self, sid):
+            db_threads.append(threading.get_ident())
+            return sid, sid, [sid]
+
+        def get_session(self, sid):
+            db_threads.append(threading.get_ident())
+            return {"id": sid, "source": "ios"}
+
+        def delete_conversations(self, ids, **kwargs):
             db_threads.append(threading.get_ident())
             assert ids == ["one", "two"]
-            return 2
+            return {"ok": True, "deleted": 2, "deleted_rows": 2,
+                    "deleted_conversations": 2, "deleted_ids": ["one", "two"],
+                    "app_chat_ids": ["one", "two"], "skipped_active": []}
 
         def close(self):
             db_threads.append(threading.get_ident())
@@ -36,6 +50,7 @@ def test_bulk_delete_sessiondb_work_runs_off_event_loop(monkeypatch):
         return _DB()
 
     monkeypatch.setattr(_web_server_sessions, "_open_session_db_for_profile", _open_db)
+    monkeypatch.setattr(_rt_sessions, "_serving_profile", lambda profile: "default")
 
     result = asyncio.run(
         _rt_sessions.bulk_delete_sessions_endpoint(
@@ -43,8 +58,8 @@ def test_bulk_delete_sessiondb_work_runs_off_event_loop(monkeypatch):
         )
     )
 
-    assert result == {"ok": True, "deleted": 2, "skipped_active": []}
-    assert db_modes == [False]
+    assert result["deleted_ids"] == ["one", "two"]
+    assert db_modes == [True, False]
     assert db_threads
     assert all(thread_id != loop_thread for thread_id in db_threads)
 
@@ -119,7 +134,19 @@ def test_session_rename_runs_writer_open_and_update_off_event_loop(monkeypatch):
     db_threads: list[int] = []
 
     class _DB:
-        def set_session_title(self, sid, title):
+        def resolve_session_id(self, sid):
+            db_threads.append(threading.get_ident())
+            return sid
+
+        def get_compression_conversation(self, sid):
+            db_threads.append(threading.get_ident())
+            return sid, sid, [sid]
+
+        def get_session(self, sid):
+            db_threads.append(threading.get_ident())
+            return {"id": sid, "source": "ios"}
+
+        def set_conversation_title(self, sid, title):
             db_threads.append(threading.get_ident())
             assert (sid, title) == ("sess-1", "renamed")
 
@@ -134,11 +161,11 @@ def test_session_rename_runs_writer_open_and_update_off_event_loop(monkeypatch):
     def _open_db(profile=None, *, read_only):
         db_threads.append(threading.get_ident())
         assert profile is None
-        assert read_only is False
         return _DB()
 
     monkeypatch.setattr(_web_server_sessions, "_open_session_db_for_profile", _open_db)
     monkeypatch.setattr(_rt_sessions, "_resolve_session_id", lambda db, sid: sid)
+    monkeypatch.setattr(_rt_sessions, "_serving_profile", lambda profile: "default")
 
     result = asyncio.run(
         _rt_sessions.rename_session_endpoint(
@@ -146,6 +173,6 @@ def test_session_rename_runs_writer_open_and_update_off_event_loop(monkeypatch):
         )
     )
 
-    assert result == {"ok": True, "title": "renamed"}
+    assert result == {"ok": True, "title": "renamed", "app_chat_id": "sess-1"}
     assert db_threads
     assert all(thread_id != loop_thread for thread_id in db_threads)

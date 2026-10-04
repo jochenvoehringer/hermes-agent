@@ -4536,7 +4536,11 @@ class TestBulkDeleteSessionsEndpoint:
             "/api/sessions/bulk-delete", json={"ids": ["a", "b"]}
         )
         assert resp.status_code == 200
-        assert resp.json() == {"ok": True, "deleted": 2, "skipped_active": []}
+        assert resp.json() == {
+            "ok": True, "deleted": 2, "deleted_rows": 2,
+            "deleted_conversations": 2, "deleted_ids": ["a", "b"],
+            "app_chat_ids": ["a", "b"], "skipped_active": [],
+        }
 
         db = SessionDB()
         try:

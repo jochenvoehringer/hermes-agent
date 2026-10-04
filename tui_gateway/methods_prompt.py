@@ -650,6 +650,8 @@ def _lock_in_submit_turn(
     with _session_turn_admission(session) as admitted:
         if not admitted:
             return _err(rid, 5035, "backend is retiring; reconnect to continue"), fields
+        if session.get("running"):
+            return _err(rid, 4094, "chat_busy"), fields
         # A watch session's run lives in the PARENT turn (own running flag False); typing
         # mid-run would build a second agent racing the child on the same stored session.
         if session.get("lazy") and _child_run_active(
@@ -756,6 +758,8 @@ def _(rid, params: dict) -> dict:
                 break
             if internal_hosted_submit:
                 return _err(rid, 4091, "hosted room member session is busy")
+            if is_truthy_value(params.get("reject_if_busy", False)):
+                return _err(rid, 4094, "chat_busy")
             busy_transport = t or session.get("transport")
         if has_truncation:
             # A rewind/edit/restore/regenerate must land as a truncation, never as a
@@ -774,8 +778,21 @@ def _(rid, params: dict) -> dict:
     requested_rebind_ids = (
         {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}
         if isinstance(raw_rebind_ids, list) else None)
-    err, survivor_fields = _lock_in_submit_turn(
-        rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
+    while True:
+        err, survivor_fields = _lock_in_submit_turn(
+            rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
+        if not err or err.get("error", {}).get("code") != 4094:
+            break
+        if is_truthy_value(params.get("reject_if_busy", False)):
+            break
+        if has_truncation:
+            return _err(rid, 4009, "session busy")
+        busy_response = _handle_busy_submit(
+            rid, sid, session, text, t or session.get("transport"),
+            queued=bool(params.get("queued")), turn_author=turn_author,
+            display_kind=display_kind)
+        if busy_response is not None:
+            return busy_response
     if err is not None:
         return err
     if turn_isolation:

@@ -7,6 +7,7 @@ import pytest
 # legitimately probes the checkout's adjacent payload manifest during import.
 import agent.conversation_loop  # noqa: F401
 from hermes_state import ConversationDeleteConflict, SessionDB
+from hermes_state_conversations import ConversationDeleteLimitError
 
 
 def seed(
@@ -103,6 +104,31 @@ def test_delete_revision_fails_closed_when_scope_changes(tmp_path: Path):
     with pytest.raises(ConversationDeleteConflict):
         db.delete_conversation("root", preview.revision)
     assert db.get_session("root") is not None
+
+
+def test_bulk_conversation_delete_expands_lineage_and_preserves_branch(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    seed(db, "root", end_reason="compression")
+    seed(db, "tip", parent="root")
+    seed(db, "branch", parent="root", model_config={"_branched_from": "root"})
+
+    result = db.delete_conversations(["tip", "missing"])
+
+    assert result["deleted_conversations"] == 1
+    assert result["deleted_ids"] == ["root", "tip"]
+    assert result["deleted"] == 2
+    assert db.get_session("branch") is not None
+
+
+def test_bulk_conversation_delete_limit_rolls_back(tmp_path: Path):
+    db = SessionDB(tmp_path / "state.db")
+    seed(db, "root", end_reason="compression")
+    seed(db, "tip", parent="root")
+
+    with pytest.raises(ConversationDeleteLimitError):
+        db.delete_conversations(["root"], max_rows=1)
+    assert db.get_session("root") is not None
+    assert db.get_session("tip") is not None
 
 
 def test_delete_revision_fails_closed_when_same_size_transcript_is_replaced(

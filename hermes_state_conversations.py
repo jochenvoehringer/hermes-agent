@@ -34,6 +34,10 @@ class ConversationDeleteConflict(RuntimeError):
     pass
 
 
+class ConversationDeleteLimitError(ValueError):
+    pass
+
+
 def _conversation_revision(
     delete_ids: Iterable[str], message_count: int, latest_message_row_id: int
 ) -> str:
@@ -241,3 +245,48 @@ class SessionConversationMixin:
             for session_id in removed_ids:
                 self._remove_session_files(sessions_dir, session_id)
         return bool(deleted)
+
+    def delete_conversations(
+        self,
+        requested_ids: Iterable[str],
+        *,
+        sessions_dir: Optional[Path] = None,
+        max_rows: int = 500,
+    ) -> dict:
+        """Atomically delete selected conversations, skipping whole live-guarded lineages."""
+        removed_ids: List[str] = []
+
+        def _do(conn):
+            targets = self._conversation_delete_targets_on_conn(conn, requested_ids)
+            if len(targets.delete_ids) > max_rows:
+                raise ConversationDeleteLimitError("expanded conversation delete scope exceeds limit")
+            guarded = set(self._guarded_ids(conn, targets.delete_ids))
+            admitted = tuple(
+                preview for preview in targets.conversations
+                if not guarded.intersection(preview.delete_ids)
+            )
+            skipped = tuple(
+                preview.app_chat_id for preview in targets.conversations
+                if guarded.intersection(preview.delete_ids)
+            )
+            delete_ids = tuple(sorted({sid for preview in admitted for sid in preview.delete_ids}))
+            count, deleted_ids = self._delete_sessions_on_conn(
+                conn, delete_ids, expected_delete_ids=delete_ids,
+            )
+            if set(deleted_ids) != set(delete_ids):
+                raise ConversationDeleteConflict("conversation delete scope changed")
+            removed_ids.extend(deleted_ids)
+            return {
+                "ok": True,
+                "deleted_conversations": len(admitted),
+                "deleted_rows": count,
+                "deleted": count,
+                "deleted_ids": sorted(deleted_ids),
+                "skipped_active": sorted(skipped),
+                "app_chat_ids": [preview.app_chat_id for preview in admitted],
+            }
+
+        result = self._execute_write(_do)
+        for sid in removed_ids:
+            self._remove_session_files(sessions_dir, sid)
+        return result

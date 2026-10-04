@@ -28,8 +28,13 @@ from hermes_cli.web_routers._common import (
     CORRUPT_STORE_DETAIL, corrupt_store_as_status, log as _log, destructive_profile, http_failure,
 )
 from hermes_state import is_malformed_db_error
-from hermes_state_errors import SessionActiveWriteGuardError, StateDbReplacedError, is_transient_sqlite_error
+from hermes_state_errors import StateDbReplacedError, is_transient_sqlite_error
 from hermes_state_health import STORAGE_CORRUPT, note_storage_error, storage_state
+from hermes_state_conversations import ConversationDeleteConflict, ConversationDeleteLimitError
+from tui_gateway.session_mutation_extensions import (
+    SessionMutationBusy, SessionMutationExtensionError, SessionMutationRequest,
+    run_session_mutation,
+)
 
 list_router = APIRouter()
 search_router = APIRouter()
@@ -170,6 +175,48 @@ def _resolve_session_id(db, session_id: str) -> Optional[str]:
         # RuntimeError family, not sqlite3: same 503 payload as the analytics reads (#110054).
         with corrupt_store_as_status(db.db_path):
             raise
+
+
+def _mutation_requests_for_db(db, profile, session_ids, actions):
+    """Resolve process-local mutation claims without guessing from a requested prefix."""
+    requests = {}
+    owner = _serving_profile(profile)
+    for requested_id in session_ids:
+        sid = _resolve_session_id(db, requested_id)
+        if not sid:
+            continue
+        app_chat_id, tip_id, _lineage = db.get_compression_conversation(sid)
+        row = db.get_session(tip_id)
+        if not row:
+            continue
+        for action in actions:
+            request = SessionMutationRequest(
+                profile=owner, session_id=app_chat_id,
+                source=str(row.get("source") or ""), action=action,
+            )
+            requests[(app_chat_id, action)] = request
+    return tuple(requests[key] for key in sorted(requests))
+
+
+def _run_coordinated_mutation_for_ids(profile, session_ids, actions, mutation):
+    """Plan and execute on the worker thread, never on FastAPI's event loop."""
+    requests = _with_db(
+        profile,
+        lambda db: _mutation_requests_for_db(db, profile, session_ids, actions),
+        read_only=True,
+    )
+    coordinated = mutation
+    for request in reversed(requests):
+        inner = coordinated
+        coordinated = lambda request=request, inner=inner: run_session_mutation(request, inner)
+    return coordinated()
+
+
+def _mutation_http_error(exc):
+    return HTTPException(
+        status_code=409 if isinstance(exc, SessionMutationBusy) else 503,
+        detail="chat_busy" if isinstance(exc, SessionMutationBusy) else "session_mutation_unavailable",
+    )
 
 
 # ``le=100`` on limit: an unbounded limit lets one request drag every session
@@ -435,21 +482,27 @@ async def search_sessions(
 
 @manage_router.post("/api/sessions/bulk-delete")
 async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
-    """Delete every session in ``body.ids`` in one transaction (POST: many
-    clients refuse a DELETE body).
-
-    Per :meth:`SessionDB.delete_sessions`: unknown ids are skipped (``deleted``
-    reports what really happened), children are orphaned, active/archived rows
-    ARE deleted (hand-picked), on-disk cleanup is left to the next prune.
-    """
+    """Delete selected conversations atomically, including compression continuations."""
     # Hard cap so a runaway selection can't lock the writer for long.
     if len(body.ids) > 500:
         raise HTTPException(status_code=400, detail="ids must contain at most 500 entries")
     profile = destructive_profile(body.profile, "POST /api/sessions/bulk-delete")
-    skipped: list[str] = []  # rows a live turn/compression still owns; the UI must keep them listed
-    deleted = await asyncio.to_thread(_with_db, profile, lambda db: db.delete_sessions(
-        body.ids, exclude_active_write_guards=True, skipped_ids=skipped), read_only=False)
-    return {"ok": True, "deleted": deleted, "skipped_active": skipped}
+    try:
+        return await asyncio.to_thread(
+            _run_coordinated_mutation_for_ids, profile, body.ids, ("delete",),
+            lambda: _with_db(
+                profile,
+                lambda db: db.delete_conversations(
+                    body.ids, sessions_dir=_session_files_dir(profile), max_rows=500),
+                read_only=False,
+            ),
+        )
+    except ConversationDeleteLimitError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ConversationDeleteConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (SessionMutationBusy, SessionMutationExtensionError) as exc:
+        raise _mutation_http_error(exc) from exc
 
 
 @manage_router.post("/api/sessions/import")
@@ -798,13 +851,19 @@ async def delete_session_endpoint(session_id: str, profile: Optional[str] = None
         sid = _resolve_session_id(db, session_id)
         if not sid:
             return {"ok": True, "already_absent": True}
-        try:
-            db.delete_session(sid, sessions_dir=_session_files_dir(profile), exclude_active_write_guards=True)
-        except SessionActiveWriteGuardError as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
-        return {"ok": True}
+        result = db.delete_conversations((sid,), sessions_dir=_session_files_dir(profile))
+        if result["skipped_active"]:
+            raise HTTPException(status_code=409, detail="session has an active write guard")
+        return {**result, "deleted_count": result["deleted_rows"],
+                "app_chat_id": result["app_chat_ids"][0] if result["app_chat_ids"] else sid}
 
-    return await asyncio.to_thread(_with_db, profile, _delete, read_only=False)
+    try:
+        return await asyncio.to_thread(
+            _run_coordinated_mutation_for_ids, profile, (session_id,), ("delete",),
+            lambda: _with_db(profile, _delete, read_only=False),
+        )
+    except (SessionMutationBusy, SessionMutationExtensionError) as exc:
+        raise _mutation_http_error(exc) from exc
 
 
 @manage_router.post("/api/sessions/owner-backfill")
@@ -863,7 +922,7 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
             )
         if body.title is not None:
             try:
-                db.set_session_title(sid, body.title or "")
+                db.set_conversation_title(sid, body.title or "")
             except ValueError as e:
                 # Title too long, invalid characters, or already in use.
                 raise HTTPException(status_code=400, detail=str(e))
@@ -873,10 +932,24 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
             if value is not None:
                 setter(db, sid, value)
                 result[flag] = bool(value)
-        result["title"] = db.get_session_title(sid) or ""
+        app_chat_id, tip_id, _lineage = db.get_compression_conversation(sid)
+        result["app_chat_id"] = app_chat_id
+        result["title"] = db.get_session_title(tip_id) or ""
         return result
 
-    return await asyncio.to_thread(_with_db, body.profile, _update, read_only=False)
+    actions = tuple(
+        action for action, active in (
+            ("rename", body.title is not None),
+            ("archive" if body.archived else "restore", body.archived is not None),
+        ) if active
+    )
+    try:
+        return await asyncio.to_thread(
+            _run_coordinated_mutation_for_ids, body.profile, (session_id,), actions,
+            lambda: _with_db(body.profile, _update, read_only=False),
+        )
+    except (SessionMutationBusy, SessionMutationExtensionError) as exc:
+        raise _mutation_http_error(exc) from exc
 
 
 def _compact_json(obj) -> str:
