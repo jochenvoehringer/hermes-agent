@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 
 from tui_gateway import compute_host, server
@@ -168,6 +169,70 @@ def _record_finalize(monkeypatch, events: list[str], *sids: str) -> None:
 def _register_turn(host: ComputeHost, fn, sid: str = "s1") -> None:
     """Submit a turn exactly the way ``_handle_turn_start`` does."""
     host._track_turn_future(host._executor.submit(fn), sid)
+
+
+def test_compute_host_refreshes_and_clears_handler_on_existing_child_session():
+    child_session = {
+        "required_prompt_handler": None,
+        "history_lock": threading.Lock(),
+    }
+    fake_server = SimpleNamespace(_sessions={"ios-ui": child_session})
+    host = ComputeHost(stdout=io.StringIO(), heartbeat_secs=0)
+    try:
+        first = host._ensure_server_session(
+            fake_server,
+            {"sid": "ios-ui", "required_prompt_handler": "  hoppe_ocr_approval  "},
+        )
+        assert first["required_prompt_handler"] == "hoppe_ocr_approval"
+
+        second = host._ensure_server_session(
+            fake_server,
+            {"sid": "ios-ui", "required_prompt_handler": None},
+        )
+        assert second["required_prompt_handler"] is None
+    finally:
+        host.close()
+
+
+def test_compute_host_new_child_session_retains_required_handler():
+    init_calls = []
+    fake_server = SimpleNamespace(
+        _sessions={},
+        _make_agent=lambda *_args, **_kwargs: SimpleNamespace(),
+        _transfer_db_to_agent=lambda *_args: False,
+        _load_show_reasoning=lambda: False,
+        _load_tool_progress_mode=lambda: "all",
+        _sanitize_client_source=lambda value: value,
+    )
+
+    def init_session(sid, key, agent, history, **kwargs):
+        init_calls.append(kwargs)
+        fake_server._sessions[sid] = {
+            "agent": agent,
+            "session_key": key,
+            "history": history,
+            "history_lock": threading.Lock(),
+            "required_prompt_handler": kwargs.get("required_prompt_handler"),
+        }
+
+    fake_server._init_session = init_session
+    host = ComputeHost(stdout=io.StringIO(), heartbeat_secs=0)
+    try:
+        session = host._ensure_server_session(
+            fake_server,
+            {
+                "sid": "ios-ui",
+                "session_key": "stored-ios",
+                "required_prompt_handler": "  hoppe_ocr_approval  ",
+                "attached_images": ["/tmp/protected.png"],
+                "source": "ios",
+            },
+        )
+    finally:
+        host.close()
+
+    assert session["required_prompt_handler"] == "hoppe_ocr_approval"
+    assert init_calls[0]["required_prompt_handler"] == "hoppe_ocr_approval"
 
 
 def test_shutdown_drains_in_flight_turn_before_finalizing_sessions(monkeypatch):

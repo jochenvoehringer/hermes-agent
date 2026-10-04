@@ -327,6 +327,17 @@ def test_compute_host_explicit_images_do_not_clear_later_attachment(monkeypatch)
     assert session["attached_images"] == ["/tmp/c.png"]
 
 
+def test_compute_host_turn_frame_carries_normalized_required_handler():
+    session = _session(
+        required_prompt_handler="  hoppe_ocr_approval  ",
+        attached_images=["/tmp/protected.png"],
+    )
+
+    frame = server._compute_host_turn_frame("rid", "sid", session, "inspect")
+
+    assert frame["required_prompt_handler"] == "hoppe_ocr_approval"
+
+
 def test_prompt_submit_unknown_session_logs_warning(caplog):
     """A submit against a reaped runtime id must leave a diagnosable trace.
 

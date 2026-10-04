@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Collection
 
 from tui_gateway.host_supervisor import MUTATOR_ROUTE_TABLE, _build_sha
+from tui_gateway.prompt_dispatch_hooks import normalize_required_prompt_handler
 
 
 def now_ns() -> int:
@@ -313,9 +314,13 @@ class ComputeHost:
 
     def _ensure_server_session(self, server: Any, frame: dict[str, Any]) -> dict:
         sid = str(frame.get("sid") or "")
+        required_prompt_handler = normalize_required_prompt_handler(
+            frame.get("required_prompt_handler")
+        )
         session = server._sessions.get(sid)
         if session is not None:
             session["transport"] = self._transport
+            session["required_prompt_handler"] = required_prompt_handler
             if frame.get("cols") is not None:
                 session["cols"] = int(frame.get("cols") or 80)
             for key in ("cwd", "profile_home"):
@@ -387,7 +392,10 @@ class ComputeHost:
                 server._init_session(
                     sid, key, agent, list(history), cols=int(frame.get("cols") or 80),
                     cwd=str(frame.get("cwd") or "") or None, session_db=session_db,
-                    source=frame.get("source"))
+                    source=frame.get("source"),
+                    required_prompt_handler=normalize_required_prompt_handler(
+                        frame.get("required_prompt_handler")
+                    ))
             finally:
                 reset_transport(token)
         except Exception:
@@ -404,9 +412,15 @@ class ComputeHost:
                 "tool_progress_mode": server._load_tool_progress_mode(), "edit_snapshots": {},
                 "tool_started_at": {}, "model_override": frame.get("model_override"),
                 "source": server._sanitize_client_source(frame.get("source")),
+                "required_prompt_handler": normalize_required_prompt_handler(
+                    frame.get("required_prompt_handler")
+                ),
                 "transport": self._transport}
         session = server._sessions[sid]
         session["transport"] = self._transport
+        session["required_prompt_handler"] = normalize_required_prompt_handler(
+            frame.get("required_prompt_handler")
+        )
         # The host pipe names no login; the record carries the one the gateway stamped at creation.
         session["auth_user_id"] = frame.get("auth_user_id")
         session["profile_home"] = profile_home or session.get("profile_home")
