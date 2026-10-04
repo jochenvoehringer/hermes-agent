@@ -92,12 +92,13 @@ def test_pre_prompt_dispatch_is_a_public_plugin_hook():
     assert "pre_prompt_dispatch" in VALID_HOOKS
 
 
-def test_required_image_turn_blocks_without_matching_directive():
+def test_required_image_turn_blocks_with_generic_english_default(monkeypatch):
     """A removed or unloaded required plugin must not expose the image to the agent."""
-    from tui_gateway.prompt_dispatch_hooks import (
-        REQUIRED_HANDLER_UNAVAILABLE_TEXT,
-        resolve_prompt_dispatch_results,
-    )
+    from agent import i18n
+    from tui_gateway.prompt_dispatch_hooks import resolve_prompt_dispatch_results
+
+    monkeypatch.setenv("HERMES_LANGUAGE", "en")
+    i18n.reset_language_cache()
 
     decision = resolve_prompt_dispatch_results(
         [],
@@ -107,8 +108,32 @@ def test_required_image_turn_blocks_without_matching_directive():
 
     assert decision.action == "block"
     assert decision.handler == "hoppe_ocr_approval"
-    assert decision.text == REQUIRED_HANDLER_UNAVAILABLE_TEXT
+    assert decision.text == (
+        "The required prompt handler is currently unavailable. "
+        "Your attachments were not sent to the agent. Please try again after "
+        "the handler is available."
+    )
     assert decision.reason == "required_prompt_handler_unavailable"
+
+
+def test_required_image_turn_uses_configured_translation(monkeypatch):
+    from agent import i18n
+    from tui_gateway.prompt_dispatch_hooks import resolve_prompt_dispatch_results
+
+    monkeypatch.setenv("HERMES_LANGUAGE", "de")
+    i18n.reset_language_cache()
+
+    decision = resolve_prompt_dispatch_results(
+        [],
+        required_prompt_handler="any_required_handler",
+        has_images=True,
+    )
+
+    assert decision.text == (
+        "Der erforderliche Prompt-Handler ist derzeit nicht verfügbar. "
+        "Ihre Anhänge wurden nicht an den Agenten weitergegeben. Versuchen Sie "
+        "es erneut, sobald der Handler verfügbar ist."
+    )
 
 
 def test_required_image_turn_ignores_foreign_and_handlerless_directives():
