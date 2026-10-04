@@ -11,7 +11,9 @@ import functools
 import json
 import logging
 import os
+import re
 import time
+import unicodedata
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
@@ -1099,6 +1101,19 @@ def _handle_create(args: dict, **kw) -> str:
     assignee = args.get("assignee")
     _check(assignee, "assignee is required — name the profile that should execute this "
                      "task (the dispatcher will only spawn tasks with an assignee)")
+    if str(args.get("initial_status") or "running").strip().lower() == "blocked":
+        return tool_error(
+            "kanban_create: naked initially blocked tasks are forbidden; use the "
+            "domain approval service. Do not retry as running, because that would "
+            "bypass the human decision."
+        )
+    body = args.get("body")
+    normalized_body = unicodedata.normalize("NFKC", body).casefold() if isinstance(body, str) else ""
+    if re.search(r"\bmodus\s*:\s*write_authorized\b", normalized_body):
+        return tool_error(
+            "kanban_create: workers cannot mint write authorization. Create a "
+            "domain approval proposal and wait for the human decision."
+        )
     # Workspace sharing is always explicit: omitted fields mean a fresh scratch workspace
     # even for a dispatcher-spawned creator (reusing the parent's path would let a child
     # mutate review evidence or race its checkout). Project identity is the one safe thing

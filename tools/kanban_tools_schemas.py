@@ -471,12 +471,10 @@ KANBAN_CREATE_SCHEMA = _schema(
         )),
         "initial_status": {
             "type": "string",
-            "enum": ["running", "blocked"],
+            "enum": ["running"],
             "description": (
-                "Initial card status. Use 'blocked' for tasks that "
-                "require immediate human ops (R3 gate) to skip the "
-                "brief running-to-blocked transition. Defaults to "
-                "'running', which preserves the usual dispatch path."
+                "Worker-created cards may only be running. Human approval "
+                "cards must be created atomically by a domain approval service."
             ),
         },
         "skills": {

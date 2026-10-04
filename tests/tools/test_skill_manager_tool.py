@@ -254,6 +254,19 @@ class TestCreateSkill:
 
 
 class TestEditSkill:
+    @pytest.mark.require_symlinks
+    def test_find_symlinked_skill(self, tmp_path):
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "SKILL.md").write_text(VALID_SKILL_CONTENT)
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        (skills / "hoppe-skill").symlink_to(source, target_is_directory=True)
+        with _skill_dir(skills):
+            found = _find_skill("hoppe-skill")
+        assert found is not None
+        assert found["path"] == skills / "hoppe-skill"
+
     def test_edit_existing_skill(self, tmp_path):
         with _skill_dir(tmp_path):
             _create_skill("my-skill", VALID_SKILL_CONTENT)
