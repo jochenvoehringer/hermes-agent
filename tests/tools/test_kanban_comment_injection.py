@@ -125,6 +125,36 @@ def test_skips_own_authored_comments(worker_home, monkeypatch):
     assert agent.steers == []
 
 
+def test_price_worker_pseudonymizes_injected_comment(worker_home, monkeypatch):
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="price task", assignee="preis")
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_PROFILE", "preis")
+    agent = FakeAgent()
+
+    _unthrottle()
+    kt.inject_new_comments_from_env(agent)
+    conn = kbc.connect()
+    try:
+        kb.add_comment(
+            conn, tid, author="operator",
+            body="Kontakt Clara Zrenner, clara.zrenner@example.com, +491701234567",
+        )
+    finally:
+        conn.close()
+
+    _unthrottle()
+    assert kt.inject_new_comments_from_env(agent) is True
+    note = agent.steers[0]
+    assert "Clara Zrenner" not in note
+    assert "clara.zrenner@example.com" not in note
+    assert "+491701234567" not in note
+    assert "[PERSON_1]" in note
+
+
 def test_delegated_child_in_worker_process_neither_receives_nor_consumes_notes(worker_home, monkeypatch):
     """A delegate_task child inherits the worker's ``HERMES_KANBAN_TASK``; operator notes
     address the worker, so the child must not be steered by them and must not advance the

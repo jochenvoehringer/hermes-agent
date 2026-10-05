@@ -879,7 +879,8 @@ def _redact_phone(m):
 
 def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = False,
                           file_read: bool = False, secret_file: bool = False,
-                          redact_url_credentials: bool = False) -> str:
+                          redact_url_credentials: bool = False,
+                          redact_phone_numbers: bool = True) -> str:
     """Apply all redaction patterns to a block of text.
 
     Safe on any string. Enabled by default (``security.redact_secrets: false``
@@ -983,7 +984,7 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
     if "&" in text and "=" in text:
         text = _redact_form_body(text)
 
-    if "+" in text:
+    if redact_phone_numbers and "+" in text:
         text = _SIGNAL_PHONE_RE.sub(_redact_phone, text)
 
     return text

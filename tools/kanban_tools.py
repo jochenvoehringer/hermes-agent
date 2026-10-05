@@ -348,7 +348,7 @@ def _ok_landed(kb, conn, tid: str, default_status: str, **extra: Any) -> str:
 
 
 def _redact(value: Any) -> str:
-    return redact_sensitive_text(str(value), force=True)
+    return redact_sensitive_text(str(value), force=True, redact_phone_numbers=False)
 
 
 def _redact_opt(value: Any) -> Any:
@@ -358,7 +358,7 @@ def _redact_opt(value: Any) -> Any:
 def _redact_metadata(metadata: dict) -> Optional[dict]:
     """Redact via a JSON round-trip; None if the result can't be re-parsed."""
     try:
-        return json.loads(redact_sensitive_text(json.dumps(metadata), force=True))
+        return json.loads(_redact(json.dumps(metadata)))
     except json.JSONDecodeError:
         return None
 
@@ -652,6 +652,10 @@ def inject_new_comments_from_env(agent: Any) -> bool:
     note = ("New note" + ("s" if len(fresh) > 1 else "")
             + " on your kanban task from the operator (delivered mid-run). "
             + "Take it into account for the work you're doing right now:\n" + "\n".join(lines))
+    if own.casefold() == "preis":
+        from hermes_cli.kanban_privacy import pseudonymize_price_context
+
+        note = pseudonymize_price_context(note)
     try:
         return bool(agent.steer(note))
     except Exception:

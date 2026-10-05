@@ -3413,7 +3413,7 @@ def redact_review_value(value: Any) -> Any:
     if isinstance(value, str):
         from agent.redact import redact_sensitive_text
 
-        return redact_sensitive_text(value, force=True)
+        return redact_sensitive_text(value, force=True, redact_phone_numbers=False)
     if isinstance(value, dict):
         return {key: redact_review_value(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -4077,7 +4077,12 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     _ctx_parent_results(lines, conn, task_id, now)
     _ctx_role_history(lines, conn, task, now)
     _ctx_comments(lines, list_comments(conn, task_id), now)
-    return "\n".join(lines).rstrip() + "\n"
+    context = "\n".join(lines).rstrip() + "\n"
+    if (task.assignee or "").strip().casefold() == "preis":
+        from hermes_cli.kanban_privacy import pseudonymize_price_context
+
+        return pseudonymize_price_context(context)
+    return context
 
 
 def _ctx_cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:

@@ -31,6 +31,29 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
+def test_price_worker_context_pseudonymizes_contact_pii(kanban_home):
+    body = "Kontakt Clara Zrenner, clara.zrenner@example.com, +491701234567"
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="Preis für Clara Zrenner", body=body, assignee="preis")
+        context = kb.build_worker_context(conn, task_id)
+        stored = kb.get_task(conn, task_id)
+
+    assert stored is not None and stored.body == body
+    assert "Clara Zrenner" not in context
+    assert "clara.zrenner@example.com" not in context
+    assert "+491701234567" not in context
+    assert "[PERSON_1]" in context
+
+
+def test_other_worker_context_preserves_contact_pii(kanban_home):
+    body = "Kontakt Clara Zrenner, clara.zrenner@example.com, +491701234567"
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="Research", body=body, assignee="research")
+        context = kb.build_worker_context(conn, task_id)
+
+    assert body in context
+
+
 def _init_git_repo(repo: Path) -> None:
     repo.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True, text=True)
