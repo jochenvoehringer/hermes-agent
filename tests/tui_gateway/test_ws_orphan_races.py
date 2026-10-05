@@ -254,7 +254,7 @@ def test_late_rpc_from_closed_socket_keeps_orphan_reap_armed(monkeypatch, path, 
                           profile_home=None, profile_resume_cwd=None, found={},
                           messages=lambda history: [], mint=lambda: ("unused", "tui", "."),
                           restore=lambda: ([], [], []), display_prefix=lambda: [],
-                          inline_images=True)
+                          inline_images=True, required_prompt_handler=None)
     if path == "unpersisted":
         response = server._resume_live_unpersisted(ctx, sid, session)
     elif path == "reuse":
