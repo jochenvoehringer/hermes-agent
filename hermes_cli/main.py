@@ -604,8 +604,26 @@ def _apply_profile_override() -> None:
     # we must still read active_profile — the user may have run
     # `hermes profile use` and the gateway should honour it (#22502).
     hermes_home_env = os.environ.get("HERMES_HOME", "")
-    if profile_name is None and hermes_home_env and Path(hermes_home_env).parent.name == "profiles":
-        return
+    if profile_name is None and hermes_home_env:
+        from hermes_cli._parser import top_level_value_flag_sets
+
+        value_flags, optional_value_flags = top_level_value_flag_sets()
+        top_level_command = None
+        i = 0
+        while i < len(argv):
+            arg = argv[i]
+            if arg == "--":
+                break
+            takes_value = "=" not in arg and i + 1 < len(argv) and (
+                arg in value_flags
+                or (arg in optional_value_flags and not argv[i + 1].startswith("-"))
+            )
+            if not takes_value and not arg.startswith("-"):
+                top_level_command = arg
+                break
+            i += 2 if takes_value else 1
+        if Path(hermes_home_env).parent.name == "profiles" or top_level_command == "config":
+            return
 
     if (profile_name is None and not _under_gateway_supervisor(argv)
             and not _startup_fast.is_desktop_ssh_backend_argv(argv)
