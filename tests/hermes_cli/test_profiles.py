@@ -27,6 +27,7 @@ from hermes_cli.profiles import (
     get_profile_dir,
     create_profile,
     delete_profile,
+    list_profile_names,
     list_profiles,
     set_active_profile,
     get_active_profile,
@@ -840,6 +841,14 @@ class TestDeleteProfile:
 
 class TestListProfiles:
     """Tests for list_profiles()."""
+
+    def test_ignores_runtime_placeholder_directories(self, profile_env):
+        root = profile_env / ".hermes" / "profiles"
+        placeholder = root / "router"
+        (placeholder / "cron").mkdir(parents=True)
+
+        assert "router" not in list_profile_names()
+        assert "router" not in {profile.name for profile in list_profiles()}
 
     def test_returns_default_when_no_named_profiles(self, profile_env):
         profiles = list_profiles()
