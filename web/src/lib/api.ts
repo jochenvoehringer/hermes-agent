@@ -486,7 +486,7 @@ export const api = {
       ),
     ),
   deleteSession: (id: string, profile = getManagementProfile()) =>
-    fetchJSON<{ ok: boolean }>(
+    fetchJSON<{ ok: boolean; deleted_ids?: string[]; already_absent?: boolean }>(
       appendProfileParam(`/api/sessions/${encodeURIComponent(id)}`, profile),
       {
         method: "DELETE",
@@ -504,7 +504,7 @@ export const api = {
       },
     ),
   bulkDeleteSessions: (ids: string[], profile = getManagementProfile()) =>
-    fetchJSON<{ ok: boolean; deleted: number; skipped_active?: string[] }>("/api/sessions/bulk-delete", {
+    fetchJSON<{ ok: boolean; deleted_rows: number; deleted_ids: string[]; skipped_active: string[] }>("/api/sessions/bulk-delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ids, profile: profile || undefined }),

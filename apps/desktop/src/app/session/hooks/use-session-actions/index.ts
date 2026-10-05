@@ -107,6 +107,7 @@ import {
   setResumeFailedSessionId,
   setSelectedStoredSessionId,
   setSessionOwnerHint,
+  setSessions,
   setSessionStartedAt,
   setTurnStartedAt,
   setWorkspaceCwdOwner,
@@ -3312,24 +3313,38 @@ export function useSessionActions({
           }).catch(() => undefined)
         }
 
-        await deleteSession(storedSessionId, removedOwner)
+        const deleteResult = await deleteSession(storedSessionId, removedOwner)
+        const deletedIds = deleteResult.already_absent
+          ? removedIds
+          : deleteResult.deleted_ids ?? removedIds
+        const confirmedDeletedIds = deletedIds.filter((id): id is string => Boolean(id))
+        const deletedSet = new Set(confirmedDeletedIds)
+        setSessions(prev => prev.filter(session =>
+          !deletedSet.has(session.id) &&
+          !(session._lineage_root_id && deletedSet.has(session._lineage_root_id))))
+        $archivedSessions.set($archivedSessions.get().filter(session =>
+          !deletedSet.has(session.id) &&
+          !(session._lineage_root_id && deletedSet.has(session._lineage_root_id))))
+        tombstoneSessions(confirmedDeletedIds)
 
-        dropTranscriptTailEverywhere(storedSessionId)
+        for (const deletedId of confirmedDeletedIds) {
+          dropTranscriptTailEverywhere(deletedId)
+          clearQueuedPrompts(deletedId)
+        }
         // Only after the RPC lands — the optimistic eviction above can roll
         // back, and a rolled-back row must keep its watermark/marker.
-        forgetSessionUnread(removedIds, profile)
-        clearQueuedPrompts(storedSessionId)
+        forgetSessionUnread(confirmedDeletedIds, profile)
         // The journaled in-flight tail holds this session's prompt and tool
         // calls in localStorage; a deleted session must not leave that copy
         // behind to age out on its own. Purge after the RPC lands (same
         // rollback argument as the unread watermark above), passing every id
         // the delete holds: the stored tip, the row id, the lineage root, and
         // the closing runtime id — the journal keys on the stored id.
-        purgeInFlightTurnJournals([...removedIds, closingRuntimeId])
+        purgeInFlightTurnJournals([...confirmedDeletedIds, closingRuntimeId])
 
         // Preview tabs are session-owned: drop them with the session (pinned
         // tabs survive — they belong to the workspace, not the session).
-        for (const id of removedIds) {
+        for (const id of confirmedDeletedIds) {
           if (id) {
             prunePreviewTabsForSession(id)
           }

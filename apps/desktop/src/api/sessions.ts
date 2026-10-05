@@ -705,7 +705,15 @@ export async function getAllSessionMessages(
   return { session_id: resolvedSessionId, messages }
 }
 
-export function deleteSession(id: string, profile?: ProfileScope): Promise<{ ok: boolean }> {
+export interface DeleteSessionResult {
+  ok: boolean
+  already_absent?: boolean
+  deleted_ids?: string[]
+  app_chat_id?: string
+  deleted_count?: number
+}
+
+export function deleteSession(id: string, profile?: ProfileScope): Promise<DeleteSessionResult> {
   // Scope the DELETE to the owning profile IN THE URL, mirroring getSession /
   // getSessionMessages. Passing the profile only via request.profile (which the
   // Electron main process consumes for backend routing) is NOT enough: on a
@@ -720,7 +728,7 @@ export function deleteSession(id: string, profile?: ProfileScope): Promise<{ ok:
   // override + global-remote routing (both re-read/re-append the param).
   const suffix = sessionScopeQuery(profile)
 
-  return hermesApi<{ ok: boolean }>({
+  return hermesApi<DeleteSessionResult>({
     ...sessionScoped(profile),
     path: `/api/sessions/${encodeURIComponent(id)}${suffix}`,
     method: 'DELETE'

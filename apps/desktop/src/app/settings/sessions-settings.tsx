@@ -114,17 +114,19 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
       setBusyId(session.id)
 
       try {
-        await deleteSession(session.id, session.profile)
+        const result = await deleteSession(session.id, session.profile)
+        const deletedIds = result.already_absent ? [session.id] : result.deleted_ids ?? [session.id]
         // Permanent delete bypasses removeSession, so retire the persisted
         // unread state here too rather than leaving it to rot.
-        forgetSessionUnread([session.id, session._lineage_root_id], session.profile)
+        forgetSessionUnread([...deletedIds, session._lineage_root_id], session.profile)
         // Same for the journaled in-flight tail: it holds this session's
         // prompt and tool calls in localStorage, and a deleted session must
         // not leave that copy behind to age out on its own. Both ids — the
         // stored tip and the durable lineage root — the journal keys on the
         // stored id and the row may carry either.
-        purgeInFlightTurnJournals([session.id, session._lineage_root_id])
-        setLocalSessions(prev => prev.filter(s => s.id !== session.id))
+        purgeInFlightTurnJournals([...deletedIds, session._lineage_root_id])
+        const deletedSet = new Set(deletedIds)
+        setLocalSessions(prev => prev.filter(s => !deletedSet.has(s.id)))
         triggerHaptic('warning')
       } catch (err) {
         notifyError(err, s.deleteFailed)

@@ -1293,16 +1293,17 @@ export default function SessionsPage() {
     onDelete: useCallback(
       async (id: string) => {
         try {
-          await api.deleteSession(id, rowProfile(id));
-          setSessions((prev) => prev.filter((s) => s.id !== id));
-          setTotal((prev) => prev - 1);
-          if (expandedId === id) setExpandedId(null);
+          const result = await api.deleteSession(id, rowProfile(id));
+          const deleted = new Set(result.already_absent ? [id] : result.deleted_ids ?? [id]);
+          setSessions((prev) => prev.filter((s) => !deleted.has(s.id)));
+          setTotal((prev) => Math.max(0, prev - deleted.size));
+          if (expandedId && deleted.has(expandedId)) setExpandedId(null);
           // Drop the deleted ID from any active bulk-select set — it
           // can't bulk-delete a row that's already gone.
           setSelectedIds((prev) => {
-            if (!prev.has(id)) return prev;
+            if (![...deleted].some((deletedId) => prev.has(deletedId))) return prev;
             const next = new Set(prev);
-            next.delete(id);
+            for (const deletedId of deleted) next.delete(deletedId);
             return next;
           });
           // A single-session delete might have been an empty one — re-fetch
@@ -1400,7 +1401,7 @@ export default function SessionsPage() {
       if (skippedCount) {
         showToast(
           t.sessions.selectedSessionsSkippedActive
-            .replace("{deleted}", String(resp.deleted))
+            .replace("{deleted}", String(resp.deleted_rows))
             .replace("{count}", String(skippedCount)),
           "error",
         );
@@ -1408,7 +1409,7 @@ export default function SessionsPage() {
         showToast(
           t.sessions.selectedSessionsDeleted.replace(
             "{count}",
-            String(resp.deleted),
+            String(resp.deleted_rows),
           ),
           "success",
         );
@@ -1419,10 +1420,9 @@ export default function SessionsPage() {
       // pagination stays correct, and so any rows the reload pulls in
       // from later pages render in place.
       // Rows a live turn still owns were refused server-side; keep them listed.
-      const skipped = new Set(resp.skipped_active ?? []);
-      const deletedSet = new Set(ids.filter((id) => !skipped.has(id)));
+      const deletedSet = new Set(resp.deleted_ids);
       setSessions((prev) => prev.filter((s) => !deletedSet.has(s.id)));
-      setTotal((prev) => Math.max(0, prev - resp.deleted));
+      setTotal((prev) => Math.max(0, prev - resp.deleted_rows));
       if (expandedId && deletedSet.has(expandedId)) setExpandedId(null);
       clearSelection();
       loadSessions(page);

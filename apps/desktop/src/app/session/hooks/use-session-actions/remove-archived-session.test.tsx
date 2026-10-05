@@ -10,7 +10,7 @@ import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { deleteSession, type SessionInfo } from '@/hermes'
-import { setSessions } from '@/store/session'
+import { $sessions, setSessions } from '@/store/session'
 import { $archivedSessions } from '@/store/sidebar-archive'
 
 import type { ClientSessionState } from '../../../types'
@@ -116,6 +116,21 @@ describe('removeSession × archived view store', () => {
 
     expect(vi.mocked(deleteSession)).toHaveBeenCalledWith('arch-1', undefined)
     expect($archivedSessions.get().map(session => session.id)).toEqual(['arch-2'])
+  })
+
+  it('evicts every server-confirmed descendant from active and archived lists', async () => {
+    $archivedSessions.set([archivedSession(), archivedSession({ id: 'arch-child' }), archivedSession({ id: 'arch-keep' })])
+    setSessions([archivedSession({ archived: false, id: 'live-child' }), archivedSession({ archived: false, id: 'live-keep' })])
+    vi.mocked(deleteSession).mockResolvedValue({
+      ok: true,
+      deleted_ids: ['arch-1', 'arch-child', 'live-child']
+    })
+
+    const handle = await mountHarness()
+    await act(() => handle.removeSession('arch-1'))
+
+    expect($archivedSessions.get().map(session => session.id)).toEqual(['arch-keep'])
+    expect($sessions.get().map(session => session.id)).toEqual(['live-keep'])
   })
 
   it('restores the archived row when the delete RPC fails', async () => {
