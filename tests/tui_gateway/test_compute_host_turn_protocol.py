@@ -21,6 +21,20 @@ from tui_gateway import server
 from tui_gateway.compute_host import ComputeHost
 
 
+def test_compute_host_turn_frame_carries_stable_chat_identity():
+    session = {
+        "history_lock": threading.Lock(),
+        "history": [],
+        "session_key": "runtime-2",
+        "app_chat_id": "stable-chat",
+        "source": "ios",
+    }
+
+    frame = server._compute_host_turn_frame("r1", "sid", session, "hello")
+
+    assert frame["app_chat_id"] == "stable-chat"
+
+
 def _frames(out: io.StringIO) -> list[dict]:
     return [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
 

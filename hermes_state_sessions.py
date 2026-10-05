@@ -150,6 +150,37 @@ def _session_filter_where(
     return where, params
 
 
+def _append_owner_scope(where: List[str], params: List[Any], user_id: Optional[str]) -> None:
+    """Restrict a listing to one durable owner and fail closed on mixed compression chains."""
+    if user_id is None:
+        return
+    where.append("s.user_id = ?")
+    params.append(user_id)
+    where.append(
+        """NOT EXISTS (
+            WITH RECURSIVE owner_chain(id) AS (
+                SELECT child.id FROM sessions child
+                WHERE child.parent_session_id = s.id AND s.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+                UNION ALL
+                SELECT child.id FROM owner_chain chain_row
+                JOIN sessions parent ON parent.id = chain_row.id
+                JOIN sessions child ON child.parent_session_id = chain_row.id
+                WHERE parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+            )
+            SELECT 1 FROM owner_chain
+            JOIN sessions owner_row ON owner_row.id = owner_chain.id
+            WHERE owner_row.user_id IS NOT ? OR owner_row.source IS NOT s.source
+        )"""
+    )
+    params.append(user_id)
+
+
 def _collect_delegate_child_ids(conn, parent_ids: List[str]) -> List[str]:
     """Delegate-subagent ids (``_delegate_from`` marker, walked recursively) to cascade-delete with
     *parent_ids*; untagged children stay orphaned, not deleted."""
@@ -1309,7 +1340,7 @@ class SessionSessionsMixin:
         return s
 
     def list_sessions_rich(
-        self, source: str = None, sources: List[str] = None, exclude_sources: List[str] = None,
+        self, source: str = None, user_id: str = None, sources: List[str] = None, exclude_sources: List[str] = None,
         cwd_prefix: str = None, limit: int = 20, offset: int = 0, include_children: bool = False,
         min_message_count: int = 0, project_compression_tips: bool = True,
         order_by_last_active: bool = False, include_archived: bool = False, archived_only: bool = False,
@@ -1328,6 +1359,7 @@ class SessionSessionsMixin:
             exclude_sources=exclude_sources, cwd_prefix=cwd_prefix, min_message_count=min_message_count,
             archived_only=archived_only, include_archived=include_archived, include_subagents=include_subagents,
         )
+        _append_owner_scope(where_clauses, params, user_id)
         # The archived-only view is the recovery surface for rows that dropped out of every
         # default list: a session that is archived AND hidden (Bot Mode marks its sessions
         # hidden) must still be reachable there, or nothing but direct DB access can bring
@@ -1406,6 +1438,7 @@ class SessionSessionsMixin:
                 min_message_count=min_message_count, archived_only=False, include_archived=True,
                 include_subagents=include_subagents,
             )
+            _append_owner_scope(pinned_clauses, pinned_params, user_id)
             if not include_hidden and not archived_only:
                 pinned_clauses.append("s.hidden = 0")
             pinned_clauses.append("s.pinned = 1")

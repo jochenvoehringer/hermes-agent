@@ -317,10 +317,13 @@ class ComputeHost:
         required_prompt_handler = normalize_required_prompt_handler(
             frame.get("required_prompt_handler")
         )
+        app_chat_id = str(frame.get("app_chat_id") or "").strip() or None
         session = server._sessions.get(sid)
         if session is not None:
             session["transport"] = self._transport
             session["required_prompt_handler"] = required_prompt_handler
+            if app_chat_id is not None:
+                session["app_chat_id"] = app_chat_id
             if frame.get("cols") is not None:
                 session["cols"] = int(frame.get("cols") or 80)
             for key in ("cwd", "profile_home"):
@@ -342,6 +345,7 @@ class ComputeHost:
         key = str(frame.get("session_key") or sid)
         history = frame.get("history") if isinstance(frame.get("history"), list) else []
         profile_home = str(frame.get("profile_home") or "")
+        app_chat_id = str(frame.get("app_chat_id") or "").strip() or None
         session_db = home_token = secret_token = None
         owns_db = False
         try:
@@ -415,6 +419,7 @@ class ComputeHost:
                 "required_prompt_handler": normalize_required_prompt_handler(
                     frame.get("required_prompt_handler")
                 ),
+                "app_chat_id": app_chat_id,
                 "transport": self._transport}
         session = server._sessions[sid]
         session["transport"] = self._transport
@@ -423,6 +428,7 @@ class ComputeHost:
         )
         # The host pipe names no login; the record carries the one the gateway stamped at creation.
         session["auth_user_id"] = frame.get("auth_user_id")
+        session["app_chat_id"] = app_chat_id
         session["profile_home"] = profile_home or session.get("profile_home")
         if frame.get("model_override") is not None:
             session["model_override"] = frame.get("model_override")

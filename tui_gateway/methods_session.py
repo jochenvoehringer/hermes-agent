@@ -148,6 +148,9 @@ def _auto_resume_denied_source(row: dict) -> bool:
 
 def _listing_rows(db, limit: int, **kwargs) -> list:
     """Human-facing ``list_sessions_rich`` rows (most recent first), deny-list applied."""
+    owner_id = _transport_auth_user_id(current_transport())
+    if owner_id is not None:
+        kwargs.setdefault("user_id", owner_id)
     rows = db.list_sessions_rich(source=None, limit=limit, order_by_last_active=True, compact_rows=True, **kwargs)
     return [row for row in rows if not _denied_source(row)]
 
@@ -896,6 +899,7 @@ def _resume_reuse_live_locked(ctx: _Resume, sid: str, session: dict) -> dict:
                                     transport=current_transport() or _stdio_transport,
                                     inline_images=ctx.inline_images)
     payload["resumed"] = ctx.target
+    _resume_subscribe_ios(ctx, str(payload.get("session_key") or ctx.target), session)
     if ctx.defer_history:
         payload.update(messages=[], hydrating=bool(session.get("resume_hydrating")),
                        message_count=int(session.get("resume_message_count") or payload["message_count"]))
@@ -922,7 +926,31 @@ def _resume_response(
                "started_at": record["created_at"] if started_at is None else started_at, "status": status}
     if auto_continue is not None:
         payload["auto_continue"] = auto_continue
+    _resume_subscribe_ios(ctx, str(payload.get("session_key") or ctx.target), record)
     return _ok(ctx.rid, _attach_todo_state(payload, record))
+
+
+def _resume_subscribe_ios(ctx: _Resume, runtime_id: str, session: dict | None = None) -> None:
+    """Bind an iOS transport to its stable app-chat after every resume path.
+
+    iOS reconnects can outlive a reaped gateway runtime. Keep the transport set
+    keyed by the durable app chat while rebinding the active session key.
+    """
+    transport = current_transport()
+    if not transport or not isinstance(ctx.found, dict) or ctx.found.get("source") != "ios":
+        return
+    try:
+        app_chat_id, _tip, _lineage = ctx.db.get_compression_conversation(ctx.target)
+        _session_subscribers.subscribe(str(app_chat_id), runtime_id, transport)
+        if session is not None:
+            lock = session.get("history_lock")
+            if lock is None:
+                session["app_chat_id"] = str(app_chat_id)
+            else:
+                with lock:
+                    session["app_chat_id"] = str(app_chat_id)
+    except Exception:
+        logger.debug("iOS session subscriber registration failed", exc_info=True)
 
 
 def _resume_lazy(ctx: _Resume) -> dict:

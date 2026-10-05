@@ -41,6 +41,8 @@ from tui_gateway._env import env_float, env_int
 from tui_gateway.prompt_dispatch_hooks import invoke_pre_prompt_dispatch  # noqa: F401
 from tui_gateway.turn_marker import clear_turn_marker, marker_writer_state, read_turn_marker, record_turn_start  # noqa: F401
 from tui_gateway.contracts import registry as _contracts
+from tui_gateway.rpc_extensions import install_rpc_extensions
+from tui_gateway.session_subscribers import SessionSubscriberHub
 # User-facing copy shared with the split method modules (they close over this namespace).
 from tui_gateway.user_messages import (  # noqa: F401
     AGENT_BUILD_ABANDONED, AGENT_MISSING_FOR_TURN, AGENT_STILL_STARTING, agent_init_failed_message, busy_message,
@@ -91,6 +93,7 @@ with contextlib.suppress(Exception):
 from tui_gateway.render import make_stream_renderer, render_diff, render_message  # noqa: F401
 
 _sessions: dict[str, dict] = {}
+_session_subscribers = SessionSubscriberHub()
 _methods: dict[str, callable] = {}
 _db = None
 _db_error: str | None = None
@@ -701,7 +704,26 @@ def _emit(event: str, sid: str, payload: dict | None = None) -> bool:
     from agent.notification_presentation import event_presentation_muted
     if event_presentation_muted(event, sid):
         return False
-    return write_json(_event_frame(event, sid, payload))
+    frame = _event_frame(event, sid, payload)
+    wrote = write_json(frame)
+    session = _sessions.get(sid)
+    if session is not None:
+        runtime_id = str(session.get("session_key") or sid)
+        primary = current_transport() or session.get("transport")
+        with contextlib.suppress(Exception):
+            _session_subscribers.broadcast_secondary(runtime_id, primary, frame)
+        if event == "hoppe.chat.session_rotated" and isinstance(payload, dict):
+            app_chat_id = str(payload.get("app_chat_id") or "")
+            new_runtime_id = str(payload.get("session_id") or "")
+            if app_chat_id and new_runtime_id:
+                _session_subscribers.move_runtime(runtime_id, new_runtime_id, app_chat_id)
+                lock = session.get("history_lock")
+                if lock is None:
+                    session["session_key"] = new_runtime_id
+                else:
+                    with lock:
+                        session["session_key"] = new_runtime_id
+    return wrote
 
 
 from tui_gateway import server_requests as _server_requests  # noqa: E402
@@ -3683,3 +3705,5 @@ for _m in (
     _methods_i18n, _methods_shared_metrics):
     _m.register(sys.modules[__name__])
 del _m
+
+install_rpc_extensions(sys.modules[__name__])

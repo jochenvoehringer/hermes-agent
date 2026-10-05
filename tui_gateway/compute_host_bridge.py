@@ -78,6 +78,7 @@ def _compute_host_turn_frame(
         "required_prompt_handler": normalize_required_prompt_handler(
             session.get("required_prompt_handler")
         ),
+        "app_chat_id": str(session.get("app_chat_id") or "").strip() or None,
         "source": _session_source(session), "attached_images": attached_images,
         "auth_user_id": _session_auth_user_id(session),
         "queued_prompt_generation": queued_prompt_generation,
