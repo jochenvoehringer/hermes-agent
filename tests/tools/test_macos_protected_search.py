@@ -35,6 +35,23 @@ PROTECTED_NAMES = {
 }
 
 
+@pytest.mark.platforms("macos")
+def test_filename_search_directory_supplement_prunes_protected_descendants(tmp_path, monkeypatch):
+    home = tmp_path / "Users" / "alice"
+    visible = home / "work" / "Downloads" / "match-dir"
+    visible.mkdir(parents=True)
+    for name in PROTECTED_NAMES:
+        (home / name / "match-dir").mkdir(parents=True)
+    monkeypatch.setattr(file_operations, "_HOME", str(home))
+    ops = ShellFileOperations(LocalEnvironment(cwd=str(home)))
+    result = ops.search("match-dir", path=str(home), target="files")
+    assert result.error is None
+    assert result.files == [str(visible)]
+    explicit = ops.search("match-dir", path=str(home / "Downloads"), target="files")
+    assert explicit.error is None
+    assert explicit.files == [str(home / "Downloads" / "match-dir")]
+
+
 def _rg_files_commands(commands):
     return [command for command in commands if "--files" in command]
 
