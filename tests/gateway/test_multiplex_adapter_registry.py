@@ -180,6 +180,7 @@ class TestProfileRuntimeStatus:
 
 class _SecondaryRecoveryAdapter:
     platform = Platform.DISCORD
+    send_path_degraded = False
 
     def __init__(self, *, retryable=True):
         self.fatal_error_retryable = retryable
@@ -262,6 +263,36 @@ def _install_secondary_reconnect_context(
 
 
 class TestSecondaryProfileFatalRecovery:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("degraded", [False, True])
+    async def test_secondary_reconnect_replaces_stale_fatal_status(
+        self, monkeypatch, tmp_path, degraded
+    ):
+        from gateway.status import read_runtime_status, write_runtime_status
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        write_runtime_status(
+            platform="reviewer:discord", platform_state="fatal",
+            error_code="transport_stale", error_message="Previous outage",
+            needs_attention=True,
+        )
+        runner = _secondary_recovery_runner()
+        replacement = _SecondaryRecoveryAdapter()
+        replacement.send_path_degraded = degraded
+        replacement.DEGRADED_STATUS_MESSAGE = "Receive path is not confirmed"
+        runner._secondary_reconnect_attempt = AsyncMock(return_value=(replacement, True))
+        runner._schedule_planned_restart_replay = lambda: None
+        runner._schedule_resume_pending_sessions = lambda **kwargs: None
+
+        await runner._run_secondary_profile_reconnect("reviewer", Platform.DISCORD)
+        flush_runtime_status()
+
+        status = read_runtime_status(tmp_path / "gateway_state.json")["platforms"]["reviewer:discord"]
+        assert status["state"] == ("retrying" if degraded else "connected")
+        assert status["error_code"] is None
+        assert status["error_message"] == (replacement.DEGRADED_STATUS_MESSAGE if degraded else None)
+        assert status["needs_attention"] is False
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("entry", ["startup", "reconnect"])
     async def test_secondary_hydrates_secrets_off_the_event_loop(self, monkeypatch, entry):

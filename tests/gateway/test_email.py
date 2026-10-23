@@ -610,6 +610,35 @@ class TestSendMethods(unittest.TestCase):
 class TestConnectDisconnect(unittest.TestCase):
     """Test IMAP/SMTP connection lifecycle."""
 
+    def test_connect_clears_profile_runtime_error(self):
+        import asyncio
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        from unittest.mock import AsyncMock
+        from gateway.status import flush_runtime_status, read_runtime_status, write_runtime_status
+
+        adapter = self._make_adapter()
+        adapter._runtime_status_platform_key = "reviewer:email"
+
+        async def reconnect():
+            self.assertTrue(await adapter.connect(is_reconnect=True))
+            await adapter.disconnect()
+
+        with TemporaryDirectory() as home, patch.dict(os.environ, {"HERMES_HOME": home}):
+            write_runtime_status(
+                platform="reviewer:email", platform_state="fatal",
+                error_code="email_imap_fetch_failed", error_message="Previous timeout",
+            )
+            with patch.object(adapter, "_probe_imap", return_value=True), \
+                 patch.object(adapter, "_probe_smtp", return_value=True), \
+                 patch.object(adapter, "_poll_loop", new_callable=AsyncMock):
+                asyncio.run(reconnect())
+            flush_runtime_status()
+            status = read_runtime_status(Path(home) / "gateway_state.json")["platforms"]["reviewer:email"]
+            self.assertEqual(status["state"], "connected")
+            self.assertIsNone(status["error_code"])
+            self.assertIsNone(status["error_message"])
+
     def _make_adapter(self):
         from gateway.config import PlatformConfig
         with patch.dict(os.environ, {
