@@ -48,7 +48,7 @@ def test_provider_uses_assignee_home_and_restores_caller(tmp_path, monkeypatch):
     monkeypatch.setattr(gate, '_assignee_profile_home', lambda assignee: str(home))
     def callback(hook, **kwargs):
         assert str(get_hermes_home()) == str(home)
-        assert kwargs == {'contract':'controller:sample','task_id':'t_1234abcd','assignee':'sample'}
+        assert kwargs == {'contract':'controller:sample','task_id':'t_1234abcd','assignee':'sample','run_id':None}
         return [{'contract':'controller:sample','ok':True,'head_sha':'a'*40}]
     monkeypatch.setattr(plugins, 'invoke_hook', callback)
     assert collect_controller_acceptance('controller:sample','t_1234abcd','sample')['ok']

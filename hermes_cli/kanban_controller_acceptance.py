@@ -4,11 +4,11 @@ import re
 from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 
 
-def collect_controller_acceptance(contract, task_id, assignee):
+def collect_controller_acceptance(contract, task_id, assignee, run_id=None):
     from hermes_cli.kanban_pr_acceptance import _assignee_profile_home
     from hermes_cli.plugins import invoke_hook
     receipt = {"ok": False, "classification": "missing", "contract": contract,
-               "head_sha": None, "detail": "One trusted controller receipt is required.",
+               "head_sha": None, "run_id": run_id, "detail": "One trusted controller receipt is required.",
                "recovery": "Repair the named controller provider and retry completion."}
     token = None
     try:
@@ -16,7 +16,7 @@ def collect_controller_acceptance(contract, task_id, assignee):
         if home:
             token = set_hermes_home_override(home)
         results = invoke_hook("kanban_completion_acceptance", contract=contract,
-                              task_id=task_id, assignee=assignee)
+                              task_id=task_id, assignee=assignee, run_id=run_id)
         matching = [r for r in results if isinstance(r, dict) and r.get("contract") == contract]
         if len(matching) != 1:
             return receipt

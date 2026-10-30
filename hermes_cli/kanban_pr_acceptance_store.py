@@ -21,7 +21,7 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
         return False
     if contract.startswith("controller:"):
         from hermes_cli.kanban_controller_acceptance import collect_controller_acceptance
-        return snapshot, collect_controller_acceptance(contract, task_id, assignee)
+        return snapshot, collect_controller_acceptance(contract, task_id, assignee, run_id)
     published_pr = metadata.get("published_pr") if isinstance(metadata, dict) else None
     match = _PR.fullmatch(published_pr) if isinstance(published_pr, str) else None
     # Publication binds once. Retrying cannot replace the task's PR with a green sibling.
