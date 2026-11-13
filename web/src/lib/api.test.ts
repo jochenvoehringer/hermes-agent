@@ -113,6 +113,24 @@ describe("api.getModelOptions", () => {
 });
 
 describe("management profile scope", () => {
+  it("routes plugin reads to the selected profile after switching profiles", async () => {
+    vi.stubGlobal("window", {});
+    const fetchMock = jsonFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+
+    setManagementProfile("hoppe");
+    await fetchJSON("/api/plugins/memory-wiki/overview?subject_limit=2");
+    setManagementProfile("privat");
+    await fetchJSON("/api/plugins/memory-wiki/overview?subject_limit=2");
+    await fetchJSON("/api/plugins/memory-wiki/overview?profile=research");
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/plugins/memory-wiki/overview?subject_limit=2&profile=hoppe",
+      "/api/plugins/memory-wiki/overview?subject_limit=2&profile=privat",
+      "/api/plugins/memory-wiki/overview?profile=research",
+    ]);
+  });
+
   // Every family whose routes write into a named profile's home must carry the
   // scope; an unprofiled request 400s on a host that merely HAS a second profile.
   it.each([
@@ -188,6 +206,7 @@ describe("management profile scope", () => {
 
   it.each([
     ["/api/ops/backup/download", "/api/ops/backup/download?profile=worker"],
+    ["/api/plugins/memory-wiki/days", "/api/plugins/memory-wiki/days?profile=worker"],
     ["/api/ops/backup/download?full=1", "/api/ops/backup/download?full=1&profile=worker"],
     ["/api/ops/backup/download?profile=other", "/api/ops/backup/download?profile=other"],
     ["/api/sessions/abc/export", "/api/sessions/abc/export"],

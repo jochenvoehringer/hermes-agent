@@ -133,6 +133,8 @@ const PROFILE_SCOPED_PREFIXES = [
   "/api/dashboard/theme",
   "/api/dashboard/font",
   "/api/dashboard/plugins",
+  // Plugin API handlers bind the requested profile just like built-in routes.
+  "/api/plugins",
   // The shared-metrics answer is one per profile (telemetry.shared_metrics in its config.yaml).
   "/api/shared-metrics",
 ];
