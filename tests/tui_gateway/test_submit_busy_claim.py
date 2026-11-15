@@ -2,7 +2,7 @@
 
 from threading import RLock
 
-import tui_gateway.server as server
+from tui_gateway import server
 
 
 def test_lock_in_submit_refuses_a_raced_running_turn():

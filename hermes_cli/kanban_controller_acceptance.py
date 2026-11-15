@@ -25,7 +25,7 @@ def collect_controller_acceptance(contract, task_id, assignee, run_id=None):
             receipt.update(ok=True, classification="success", head_sha=proof["head_sha"],
                            detail="Trusted controller verified installation and publication.")
         return receipt
-    except Exception:
+    except Exception:  # health: allow BLE001 -- fail closed on arbitrary plugin errors without persisting operational data
         # Plugin exceptions may contain operational data; never persist them.
         return receipt
     finally:

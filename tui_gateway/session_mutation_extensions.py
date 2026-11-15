@@ -41,7 +41,7 @@ class _Registration(Generic[T]):
 
 
 _lock = RLock()
-_extensions: Dict[str, _Registration] = {}
+_extensions: dict[str, _Registration] = {}
 
 
 def register_session_mutation_extension(name, handler):

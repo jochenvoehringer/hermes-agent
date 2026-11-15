@@ -38,9 +38,8 @@ def _lineage():
 
 def test_title_renames_resumable_tip(client):
     _lineage()
-    response = client.patch("/api/sessions/root", json={"title": "Shared chat"})
+    response = client.patch("/api/sessions/tip", json={"title": "Shared chat", "request_id": "rename-chat", "expected_revision": 0})
     assert response.status_code == 200, response.text
-    assert response.json()["app_chat_id"] == "root"
     db = _db()
     try:
         assert db.get_session_title("tip") == "Shared chat"
@@ -51,10 +50,9 @@ def test_title_renames_resumable_tip(client):
 
 def test_single_delete_expands_compression_but_preserves_branch(client):
     _lineage()
-    response = client.delete("/api/sessions/root")
+    response = client.delete("/api/sessions/root", params={"request_id": "delete-chat", "expected_revision": 0, "expected_generation": 0})
     assert response.status_code == 200, response.text
     assert response.json()["deleted_ids"] == ["root", "tip"]
-    assert response.json()["app_chat_id"] == "root"
     db = _db()
     try:
         assert db.get_session("root") is None
@@ -88,7 +86,7 @@ def test_busy_extension_fails_closed_before_delete(client):
 
     unregister = register_session_mutation_extension("test-hoppe", extension)
     try:
-        response = client.delete("/api/sessions/root")
+        response = client.delete("/api/sessions/root", params={"request_id": "delete-chat", "expected_revision": 0, "expected_generation": 0})
     finally:
         unregister()
     assert response.status_code == 409

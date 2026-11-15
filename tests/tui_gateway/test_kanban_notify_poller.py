@@ -261,13 +261,16 @@ class TestNotificationPollerLoopKanbanWiring:
     def _start_poller(self, session: dict, monkeypatch, *, session_db=None):
         import contextlib
         import threading
-        import tui_gateway.server as server
+        from tui_gateway import server
 
         emits: list = []
         submits: list = []
         persisted: list = []
 
         class _RecordingDB:
+            def _session_lineage_root_to_tip(self, session_id):
+                return []
+
             def append_messages_batch(self, session_key, messages):
                 persisted.append((session_key, messages))
 
@@ -280,11 +283,12 @@ class TestNotificationPollerLoopKanbanWiring:
         monkeypatch.setattr(
             server, "_emit", lambda event, sid, payload=None: emits.append((event, payload))
         )
-        monkeypatch.setattr(
-            server,
-            "_run_prompt_submit",
-            lambda rid, sid, sess, text, **kwargs: submits.append(text),
-        )
+        def accept(rid, sid, sess, text):
+            # Model execution is replaced, including its concrete admission receipt.
+            server._emit("message.start", sid)
+            submits.append(text)
+            return True
+        monkeypatch.setattr(server, "_run_prompt_submit", accept)
         stop = threading.Event()
         thread = threading.Thread(
             target=server._notification_poller_loop,

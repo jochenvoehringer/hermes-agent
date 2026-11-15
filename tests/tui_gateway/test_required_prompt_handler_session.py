@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import threading
 
 import pytest
 
@@ -152,3 +153,15 @@ def test_eager_session_constructor_retains_required_prompt_handler(monkeypatch, 
     )
 
     assert server._sessions["eager-ios-ui"]["required_prompt_handler"] == "hoppe_ocr_approval"
+
+
+def test_compute_host_turn_frame_carries_normalized_required_handler():
+    session = dict(
+        history_lock=threading.RLock(),
+        required_prompt_handler="  hoppe_ocr_approval  ",
+        attached_images=["/tmp/protected.png"],
+    )
+
+    frame = server._compute_host_turn_frame("rid", "sid", session, "inspect")
+
+    assert frame["required_prompt_handler"] == "hoppe_ocr_approval"

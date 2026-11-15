@@ -88,7 +88,7 @@ class SessionSubscriberHub:
                 continue
             try:
                 ok = transport.write(frame)
-            except Exception:
+            except Exception:  # health: allow BLE001 -- isolate any failed peer writer without logging private message contents
                 ok = False
             if ok:
                 wrote = True

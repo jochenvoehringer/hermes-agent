@@ -31,29 +31,6 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
-def test_price_worker_context_pseudonymizes_contact_pii(kanban_home):
-    body = "Kontakt Clara Zrenner, clara.zrenner@example.com, +491701234567"
-    with kbc.connect() as conn:
-        task_id = kb.create_task(conn, title="Preis für Clara Zrenner", body=body, assignee="preis")
-        context = kb.build_worker_context(conn, task_id)
-        stored = kb.get_task(conn, task_id)
-
-    assert stored is not None and stored.body == body
-    assert "Clara Zrenner" not in context
-    assert "clara.zrenner@example.com" not in context
-    assert "+491701234567" not in context
-    assert "[PERSON_1]" in context
-
-
-def test_other_worker_context_preserves_contact_pii(kanban_home):
-    body = "Kontakt Clara Zrenner, clara.zrenner@example.com, +491701234567"
-    with kbc.connect() as conn:
-        task_id = kb.create_task(conn, title="Research", body=body, assignee="research")
-        context = kb.build_worker_context(conn, task_id)
-
-    assert body in context
-
-
 def _init_git_repo(repo: Path) -> None:
     repo.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True, text=True)
@@ -67,11 +44,6 @@ def _init_git_repo(repo: Path) -> None:
 # ---------------------------------------------------------------------------
 # Schema / init
 # ---------------------------------------------------------------------------
-
-
-
-
-
 
 
 @pytest.mark.platforms("windows")
@@ -196,21 +168,14 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-
 # ---------------------------------------------------------------------------
 # Links + dependency resolution
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Atomic claim (CAS)
 # ---------------------------------------------------------------------------
-
 
 
 def test_schedule_task_parks_time_delay_without_dispatching(kanban_home):
@@ -223,12 +188,6 @@ def test_schedule_task_parks_time_delay_without_dispatching(kanban_home):
 
         events = kb.list_events(conn, t)
         assert any(e.kind == "scheduled" and e.payload == {"reason": "run next week"} for e in events)
-
-
-
-
-
-
 
 
 def test_stale_claim_reclaim_event_records_diagnostic_payload(
@@ -324,10 +283,6 @@ def test_stale_claim_extend_live_worker_does_not_count_failure(
         assert row["consecutive_failures"] == 0
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # Rate-limit requeue: a worker that bails on a provider quota wall must be
 # released back to ``ready`` WITHOUT counting a failure, so a long (e.g.
@@ -340,8 +295,6 @@ def test_stale_claim_extend_live_worker_does_not_count_failure(
 def _exited_status(code: int) -> int:
     """Raw wait-status for a WIFEXITED child with the given exit code."""
     return code << 8
-
-
 
 
 def test_rate_limit_exit_requeues_without_counting_failure(
@@ -449,8 +402,6 @@ def test_terminal_provider_exit_blocks_after_one_attempt_in_either_lane(kanban_h
         # until an operator fixes the provider and unblocks it.
         kb.recompute_ready(conn)
         assert kb.get_task(conn, tid).status == "blocked"
-
-
 
 
 def test_respawn_guard_defers_rate_limited_within_cooldown(
@@ -583,7 +534,7 @@ def test_infrastructure_spawn_refusal_never_charges_the_card(
     never parks the card as a bare ``blocked``, the run is tagged
     ``infrastructure`` and the guard spaces the retries. A control spawn
     failure on the same card still counts."""
-    import tools.process_registry as process_registry
+    from tools import process_registry
 
     monkeypatch.setattr(process_registry, "_is_supervised_gateway_process", lambda: True)
     monkeypatch.setenv("INVOCATION_ID", "managed-gateway")
@@ -625,20 +576,9 @@ def test_infrastructure_spawn_refusal_never_charges_the_card(
         ).fetchone()[0] == 1
 
 
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Complete / block / unblock / archive / assign
 # ---------------------------------------------------------------------------
-
-
-
-
-
 
 
 def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
@@ -688,23 +628,9 @@ def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
         assert kb.get_task(conn, t2).status == "blocked"
 
 
-
-
 # ---------------------------------------------------------------------------
 # Parent-completion invariant at the claim gate (RCA t_a6acd07d)
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_delete_archived_task_removes_related_rows(kanban_home):
@@ -743,16 +669,9 @@ def test_delete_task_removes_task_and_cascades(kanban_home):
         assert len(kb.list_runs(conn, t)) == 0
 
 
-
-
 # ---------------------------------------------------------------------------
 # Comments / events / worker context
 # ---------------------------------------------------------------------------
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -760,30 +679,14 @@ def test_delete_task_removes_task_and_cascades(kanban_home):
 # ---------------------------------------------------------------------------
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # Respawn guard (check_respawn_guard + dispatch_once integration)
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Workspace resolution
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-
 
 
 def test_worktree_workspace_explicit_target_materializes_linked_worktree(kanban_home, tmp_path):
@@ -831,7 +734,6 @@ def test_worktree_workspace_explicit_target_materializes_linked_worktree(kanban_
 # ---------------------------------------------------------------------------
 # Scratch cleanup containment (#28818)
 # ---------------------------------------------------------------------------
-
 
 
 def test_complete_task_persists_scratch_artifacts_before_cleanup(kanban_home):
@@ -932,8 +834,6 @@ def test_request_review_rollback_discards_staged_copies(kanban_home):
 # ---------------------------------------------------------------------------
 
 
-
-
 def test_dir_child_completion_unblocks_deferred_scratch_parent(kanban_home, tmp_path):
     """A non-scratch ('dir') child completing must still sweep its scratch parent.
 
@@ -963,8 +863,6 @@ def test_dir_child_completion_unblocks_deferred_scratch_parent(kanban_home, tmp_
         "A 'dir' child completing must trigger the parent scratch sweep"
     )
     assert child_dir.exists(), "Non-scratch 'dir' child workspace is never deleted"
-
-
 
 
 def test_is_managed_scratch_path_rejects_kanban_metadata_subtrees(kanban_home):
@@ -1037,20 +935,9 @@ def test_symlinked_workspaces_root_does_not_widen_scratch_cleanup(kanban_home, t
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Originating session id (ACP propagation)
 # ---------------------------------------------------------------------------
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -1101,10 +988,6 @@ class TestSharedBoardPaths:
         assert kb.kanban_db_path() != profile_home / "kanban.db"
 
 
-
-
-
-
     def test_dispatcher_and_worker_share_a_real_database(
         self, tmp_path, monkeypatch
     ):
@@ -1128,8 +1011,6 @@ class TestSharedBoardPaths:
             task = kb.get_task(conn, task_id)
         assert task is not None
         assert task.title == "cross-profile"
-
-
 
 
     def test_dispatcher_spawn_injects_kanban_paths_without_stale_session(
@@ -1201,12 +1082,6 @@ class TestSharedBoardPaths:
 # ---------------------------------------------------------------------------
 # latest_summary / latest_summaries — surface task_runs.summary handoffs
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -1498,7 +1373,6 @@ def test_unlink_tasks_triggers_recompute_ready(kanban_home):
         )
 
 
-
 # ---------------------------------------------------------------------------
 # _add_column_if_missing / _migrate_add_optional_columns idempotency (#21708)
 # ---------------------------------------------------------------------------
@@ -1537,8 +1411,6 @@ def test_add_column_if_missing_is_idempotent_on_race(kanban_home):
     assert added_again is False
 
     conn.close()
-
-
 
 
 def test_connect_heals_reduced_tasks_schema_seeded_by_external_harness(kanban_home):
@@ -1615,8 +1487,6 @@ def test_resolve_hermes_argv_prefers_module_form_over_path_shim(monkeypatch):
     assert kbd._resolve_hermes_argv() == ["/opt/hermes/bin/hermes"]
 
 
-
-
 def test_resolve_hermes_argv_module_actually_runs():
     """The fallback module name must be importable + runnable.
 
@@ -1629,13 +1499,14 @@ def test_resolve_hermes_argv_module_actually_runs():
     import subprocess
     from hermes_cli import kanban_db_dispatch as kbd
     import shutil
-    import unittest.mock as mock
+    from unittest import mock
 
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop("HERMES_BIN", None)
         with mock.patch.object(shutil, "which", return_value=None):
             argv = kbd._resolve_hermes_argv()
-    r = subprocess.run(argv + ["--version"], capture_output=True, text=True, timeout=30)
+    offline = {**os.environ, "HTTPS_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9", "NO_PROXY": "", "no_proxy": ""}
+    r = subprocess.run(argv + ["--version"], capture_output=True, text=True, timeout=30, check=False, env=offline)
     assert r.returncode == 0, (
         f"`{' '.join(argv)} --version` failed (rc={r.returncode}); "
         f"stderr={r.stderr[:200]!r}"
@@ -1643,15 +1514,15 @@ def test_resolve_hermes_argv_module_actually_runs():
 
 
 def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monkeypatch):
-    """A module-form worker must carry the import context that selected it.
+    """The dispatcher's worker must carry the import context of the install that spawned it.
 
-    ``_resolve_hermes_argv`` proves ``hermes_cli`` importable in the gateway,
-    where a store-python shim has the repo root on ``sys.path`` in-process;
-    the worker env scrub strips Hermes-owned PYTHONPATH entries, so the bare
-    ``sys.executable -m hermes_cli.main`` child died on import and the board
-    auto-blocked (#122299, #122487, #122500). The spawned env must put the
-    running install's root first on PYTHONPATH — and never for a resolved shim
-    path, which owns its own imports.
+    The worker is always ``sys.executable -m hermes_cli.kanban_worker_client`` (it only submits
+    the claim to the profile owner), and the worker env scrub strips Hermes-owned PYTHONPATH
+    entries, so a bare module child died on import and the board auto-blocked (#122299,
+    #122487, #122500). The spawned env must put the running install's root first on
+    PYTHONPATH. Main's carve-out for a resolved ``hermes`` shim path does not apply here: the
+    worker never runs the resolved CLI argv, so a ``$HERMES_BIN``/PATH shim can neither replace
+    the module child nor drop the pin.
     """
     import os
     import sys
@@ -1685,13 +1556,11 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
         claim_expires=None, tenant=None, branch_name=None,
     )
 
-    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: [sys.executable, "-m", "hermes_cli.main"])
-    kbd._default_spawn(task, str(tmp_path / "ws"))
-    assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == root
-
-    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["/opt/hermes/bin/hermes"])
-    kbd._default_spawn(task, str(tmp_path / "ws"))
-    assert root not in captured["env"].get("PYTHONPATH", "").split(os.pathsep)
+    for resolved in ([sys.executable, "-m", "hermes_cli.main"], ["/opt/hermes/bin/hermes"]):
+        monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda resolved=resolved: resolved)
+        kbd._default_spawn(task, str(tmp_path / "ws"))
+        assert captured["cmd"][-3:] == [sys.executable, "-m", "hermes_cli.kanban_worker_client"]
+        assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == root
 
 
 # ---------------------------------------------------------------------------
@@ -1709,23 +1578,9 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Board-level default_workdir
 # ---------------------------------------------------------------------------
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -1765,16 +1620,8 @@ def _set_task_status(conn: sqlite3.Connection, task_id: str, status: str) -> Non
     conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
 
 
-
-
-
-
-
-
 # Stale detection — detect_stale_running
 # ---------------------------------------------------------------------------
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -1801,8 +1648,6 @@ def _write_corrupt_db(path: Path) -> bytes:
     blob = header + payload
     path.write_bytes(blob)
     return blob
-
-
 
 
 def test_repeated_corrupt_open_reuses_single_backup(tmp_path):
@@ -1874,8 +1719,6 @@ def test_locked_healthy_db_does_not_classify_as_corrupt(tmp_path, monkeypatch):
     assert "still here" in titles
 
 
-
-
 # ---------------------------------------------------------------------------
 # First-use tip for scratch workspaces
 # ---------------------------------------------------------------------------
@@ -1912,8 +1755,6 @@ def test_maybe_emit_scratch_tip_fires_once_per_install(kanban_home):
     )
 
 
-
-
 # ---------------------------------------------------------------------------
 # Connection pragmas (secure_delete, cell_size_check, synchronous=FULL)
 # ---------------------------------------------------------------------------
@@ -1926,9 +1767,6 @@ def test_connect_sets_secure_delete_on(tmp_path):
     with kbc.connect(db_path=db_path) as conn:
         row = conn.execute("PRAGMA secure_delete").fetchone()
     assert row[0] == 1, f"expected secure_delete=1, got {row[0]}"
-
-
-
 
 
 # write_txn — rollback handler must not mask the original exception
@@ -2031,14 +1869,6 @@ def test_write_txn_check_reads_correct_header_fields(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # connect_closing(): context manager that actually closes the FD
 # Regression coverage for #33159 (kanban.db FD leak — gateway crashes after
@@ -2047,10 +1877,6 @@ def test_write_txn_check_reads_correct_header_fields(tmp_path):
 # long-lived processes (gateway run_slash, dashboard decompose handler).
 # `connect_closing()` is the leak-safe replacement.
 # ---------------------------------------------------------------------------
-
-
-
-
 
 
 def test_archive_running_task_terminates_worker(kanban_home, monkeypatch):

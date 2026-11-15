@@ -5,7 +5,7 @@ import pytest
 # Import the lazy message-classification dependency before the per-test home-I/O
 # guard is installed. A default Hermes checkout lives below HERMES_HOME, and PM
 # legitimately probes the checkout's adjacent payload manifest during import.
-import agent.conversation_loop  # noqa: F401
+import agent.conversation_loop
 from hermes_state import ConversationDeleteConflict, SessionDB
 from hermes_state_conversations import ConversationDeleteLimitError
 

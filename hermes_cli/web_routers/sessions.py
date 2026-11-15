@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 from hermes_cli.session_listing import subagent_listing_scope
 from hermes_cli.web_deps import late
 from hermes_cli.web_server_gateway import _strip_session_list_rows
-from hermes_cli.web_server_sessions import _maybe_auto_archive_for_profile, _session_latest_descendant
+from hermes_cli.web_server_sessions import _session_latest_descendant
 from hermes_cli.web_models import (
     BulkDeleteSessions, SessionImport, SessionOwnerBackfill, SessionPrune, SessionRename)
 from hermes_cli.web_routers._common import (
@@ -94,7 +94,7 @@ def _prune_sessions(body: SessionPrune):
     if has_window or (attr_filters_set and "older_than_days" not in body.model_fields_set):
         effective_older_than = None
     profile_home = _cron_profile_home(body.profile)[1] if body.profile else get_hermes_home()
-    db = _open_session_db_for_profile(body.profile, read_only=False)
+    db = _open_session_db_for_profile(body.profile, read_only=body.dry_run)
     try:
         filters = {
             "older_than_days": effective_older_than, "started_before": body.started_before,
@@ -129,7 +129,7 @@ def _prune_sessions(body: SessionPrune):
 _ACTIVE_WINDOW_S = 300
 
 
-def _csv(value: Optional[str]) -> List[str]:
+def _csv(value: Optional[str]) -> list[str]:
     """Split a comma-separated query param into stripped, non-empty items."""
     return [s.strip() for s in (value or "").split(",") if s.strip()]
 
@@ -142,11 +142,16 @@ def _is_active(row: dict, now: float) -> bool:
 
 def _with_db(profile: Optional[str], fn: Callable, *, read_only: bool):
     """Open the profile's session DB, run ``fn(db)``, always close."""
-    db = _open_session_db_for_profile(profile, read_only=read_only)
-    try:
-        return fn(db)
-    finally:
-        db.close()
+    def run():
+        db = _open_session_db_for_profile(profile, read_only=read_only)
+        try:
+            return fn(db)
+        finally:
+            db.close()
+    if read_only:
+        return run()
+    from hermes_cli.web_server_sessions import _with_session_maintenance
+    return _with_session_maintenance(profile, run)
 
 
 def _serving_profile(profile: Optional[str]) -> str:
@@ -212,6 +217,26 @@ def _run_coordinated_mutation_for_ids(profile, session_ids, actions, mutation):
     return coordinated()
 
 
+async def _run_coordinated_http_mutation(profile, session_id, actions, mutation):
+    """Hold the owning extension's claim until the authority's async write settles."""
+    loop = asyncio.get_running_loop()
+
+    def coordinate():
+        requests = _with_db(profile,
+            lambda db: _mutation_requests_for_db(db, profile, [session_id], actions),
+            read_only=True)
+        coordinated = lambda: asyncio.run_coroutine_threadsafe(mutation(), loop).result()
+        for claim in reversed(requests):
+            inner = coordinated
+            coordinated = lambda claim=claim, inner=inner: run_session_mutation(claim, inner)
+        return coordinated()
+
+    try:
+        return await asyncio.to_thread(coordinate)
+    except (SessionMutationBusy, SessionMutationExtensionError) as exc:
+        raise _mutation_http_error(exc) from exc
+
+
 def _mutation_http_error(exc):
     return HTTPException(
         status_code=409 if isinstance(exc, SessionMutationBusy) else 503,
@@ -224,8 +249,8 @@ def _mutation_http_error(exc):
 @list_router.get("/api/sessions")
 def get_sessions(
     limit: int = Query(20, ge=0, le=100), offset: int = Query(0, ge=0), min_messages: int = 0,
-    archived: str = "exclude", order: str = "created", source: str = None, sources: str = None,
-    exclude_sources: str = None, cwd_prefix: str = None, full: bool = False,
+    archived: str = "exclude", order: str = "created", source: str | None = None, sources: str | None = None,
+    exclude_sources: str | None = None, cwd_prefix: str | None = None, full: bool = False,
     profile: Optional[str] = None):
     """List sessions.
 
@@ -240,9 +265,6 @@ def get_sessions(
         raise HTTPException(status_code=400, detail="order must be one of: created, recent")
     profile_name = _cron_profile_home(profile)[0] if profile else None
     try:
-        # Auto-archive is the only write on this GET path: run it on its own
-        # maintenance connection, then open the listing connection read-only.
-        _maybe_auto_archive_for_profile(profile)
         db = _open_session_db_for_profile(profile, read_only=True)
         try:
             min_message_count = max(0, min_messages)
@@ -330,8 +352,8 @@ def _is_compression_edge(child: dict, parent: dict) -> bool:
 
 @search_router.get("/api/sessions/search")
 async def search_sessions(
-    q: str = "", limit: int = 20, profile: Optional[str] = None, source: str = None,
-    sources: str = None, exclude_sources: str = None):
+    q: str = "", limit: int = 20, profile: Optional[str] = None, source: str | None = None,
+    sources: str | None = None, exclude_sources: str | None = None):
     """Search sessions by ID (first) plus FTS5 message content.
 
     Results are deduped by compression lineage, not raw ``session_id``:
@@ -474,6 +496,34 @@ async def search_sessions(
                 add_lineage_result(
                     m["session_id"],
                     hit_payload(m, m.get("snippet", ""), m.get("role"), m.get("session_started")))
+
+            # Title matches fill any remaining slots (#66242): the FTS index
+            # only covers message content, so a term that lives solely in a
+            # manually-set sessions.title would otherwise return nothing. The
+            # DB layer already knows how to LIKE-match titles across the whole
+            # compression chain (list_sessions_rich(search_query=) — the same
+            # helper the sidebar listing uses), so reuse it rather than adding
+            # a second title query path here. Best-effort: an old/odd store
+            # that rejects the call just skips the lane.
+            if len(seen) < safe_limit:
+                try:
+                    title_rows = db.list_sessions_rich(
+                        search_query=q.strip(), include_archived=True, order_by_last_active=True,
+                        source=source_filter, sources=source_list or None,
+                        exclude_sources=exclude_list or None, limit=safe_limit)
+                except Exception:  # health: allow BLE001 -- best-effort supplement lane: an old/odd store that rejects the search_query read must not fail the id+content results already collected
+                    _log.debug("Title-match supplement skipped for %r", q[: 200])
+                    title_rows = []
+                for row in title_rows:
+                    if len(seen) >= safe_limit:
+                        break
+                    sid = row.get("id")
+                    if not sid:
+                        continue
+                    preview = (row.get("preview") or "").strip()
+                    add_lineage_result(
+                        sid, hit_payload(row, preview or f"Session title matched: {q.strip()}",
+                                         None, row.get("started_at")))
             return {"results": list(seen.values())}
 
         # FTS over a large state.db is the slowest read here; keep it off the loop (#60747).
@@ -517,15 +567,11 @@ async def import_sessions_endpoint(request: Request):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid session import payload") from exc
 
-    try:
-        result = await asyncio.to_thread(
-            _with_db, body.profile, lambda db: db.import_sessions(body.sessions), read_only=False)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if not result.get("ok", False):
-        raise HTTPException(status_code=400, detail=result)
-    return result
+    from hermes_cli.web_server_sessions import _mutate_session_request
+    anchor = body.sessions[0].get('id', '') if body.sessions else ''
+    return await _mutate_session_request(request, body.profile, anchor,
+        request_id=body.request_id, expected_revision=body.expected_revision,
+        operation='import', payload={'sessions': body.sessions})
 
 
 @manage_router.get("/api/sessions/empty/count")
@@ -560,9 +606,12 @@ async def get_session_stats(profile: Optional[str] = None):
     """Session-store statistics (mirrors `hermes sessions stats`)."""
     def _stats(db):
         out = {
-            "total": db.session_count(include_archived=True),
-            "active_store": db.session_count(include_archived=False),
-            "archived": db.session_count(archived_only=True), "messages": db.message_count(),
+            # exclude_children=True: the dashboard Sessions page pairs these counts with
+            # list_sessions_rich rows, which collapse compression chains to one row carrying
+            # the tip's id — the raw row count is inflated by the hidden chain links (#54298).
+            "total": db.session_count(include_archived=True, exclude_children=True),
+            "active_store": db.session_count(include_archived=False, exclude_children=True),
+            "archived": db.session_count(archived_only=True, exclude_children=True), "messages": db.message_count(),
             "by_source": {}}
         try:
             out["by_source"] = db.session_count_by_source(
@@ -586,15 +635,33 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
         session["profile"] = _serving_profile(profile)
         session["is_default_profile"] = session["profile"] == "default"
         # A cron run's liveness is scheduler ownership, not the 300s activity
-        # window (#88443): a run inside a long tool call is still owned.
+        # window (#88443): a run inside a long tool call is still owned. A
+        # unified-runtime run's local id names no job, so stamp its identity first.
         from hermes_cli.web_routers.cron import cron_run_scheduler_owned
 
+        if session.get("source") == "cron":
+            session.update(db.cron_run_identity(sid) or {})
         owned = cron_run_scheduler_owned(session, profile)
         if owned is not None:
             session["scheduler_owned"] = owned
         return session
 
     return await asyncio.to_thread(_with_db, profile, _detail, read_only=True)
+
+
+@manage_router.get("/api/sessions/{session_id}/mutation-snapshot")
+async def get_session_mutation_snapshot(session_id: str, request: Request, profile: Optional[str] = None):
+    from hermes_cli.web_server_sessions import _session_mutation_context
+    authority, _actor = _session_mutation_context(request, profile)
+    if authority is None:  # standalone serve: the counters the offline receipt checks
+        row = await asyncio.to_thread(_with_db, profile, lambda db: db.get_session(session_id), read_only=True)
+    else:
+        row = authority.db.get_session(session_id)
+    # An absent import anchor has revision zero by the owner's storage contract,
+    # not by a client guessing after a failed or stale detail request.
+    return {'session_id': session_id, 'exists': row is not None,
+            'runtime_revision': row['runtime_revision'] if row else 0,
+            'runtime_generation': row['runtime_generation'] if row else None}
 
 
 @manage_router.get("/api/sessions/{session_id}/latest-descendant")
@@ -683,8 +750,9 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
     from agent.context_compressor import is_compaction_summary_message
     from agent.conversation_compression import _extract_steer_text_from_message
     from agent.history_commentary import project_history_commentary
+    from agent.message_metadata import withheld_prompt_text
     from agent.prompt_builder import STEER_DISPLAY_KIND
-    from agent.turn_failure_copy import untyped_failed_turn_display_kind
+    from agent.turn_failure_copy import CONTENT_REFUSED_DISPLAY_KIND, untyped_failed_turn_display_kind
 
     # inline_images=False (#116511): render content through the gateway's ``_coerce_message_text``
     # projection so a data-URI image part becomes ``[image]`` — the same branch session.resume's
@@ -717,6 +785,9 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
         if message.get("role") == "user" and message.get("display_kind") == STEER_DISPLAY_KIND and (
                 steer_text := _extract_steer_text_from_message(message)):
             message = {**message, "display_content": steer_text}
+        # A pre_llm_call veto stores a placeholder; the transcript shows what the user typed.
+        if message.get("role") == "user" and (typed := withheld_prompt_text(message)) is not None:
+            message = {**message, "display_content": typed}
         if not is_compaction_summary_message(message):
             projected_messages.append(message)
             continue
@@ -730,7 +801,10 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
             # Desktop consumes this display-only projection. A legacy hidden
             # wrapper must not hide a successfully recovered live ask.
             projected["display_content"] = display_view.get("content")
-            projected.pop("display_kind", None)
+            # A refused ask embedded in a carrier keeps its content_refused tag so the reopened
+            # transcript still renders the greyed refused block (#149708 review).
+            if projected.get("display_kind") != CONTENT_REFUSED_DISPLAY_KIND:
+                projected.pop("display_kind", None)
         projected_messages.append(projected)
     return project_history_commentary(projected_messages, home=home)
 
@@ -843,31 +917,52 @@ async def get_session_messages_around(
 
 
 @manage_router.delete("/api/sessions/{session_id}")
-async def delete_session_endpoint(session_id: str, profile: Optional[str] = None):
-    def _delete(db):
-        # Already-absent is an idempotent success: the desktop optimistically
-        # removes the row and RESTORES it on any error, so a 404 resurrected
-        # ghost rows (transient empties racing the sidebar snapshot).
-        sid = _resolve_session_id(db, session_id)
-        if not sid:
-            return {"ok": True, "already_absent": True}
-        result = db.delete_conversations((sid,), sessions_dir=_session_files_dir(profile))
-        if result["skipped_active"]:
-            raise HTTPException(status_code=409, detail="session has an active write guard")
-        return {**result, "deleted_count": result["deleted_rows"],
-                "app_chat_id": result["app_chat_ids"][0] if result["app_chat_ids"] else sid}
-
+async def delete_session_endpoint(session_id: str, request: Request, profile: Optional[str] = None,
+                                  request_id: Optional[str] = None, expected_revision: Optional[int] = None,
+                                  expected_generation: Optional[int] = None):
+    from hermes_cli.web_server_sessions import _mutate_session_request
+    from hermes_state import SessionDB
     try:
-        return await asyncio.to_thread(
-            _run_coordinated_mutation_for_ids, profile, (session_id,), ("delete",),
-            lambda: _with_db(profile, _delete, read_only=False),
-        )
-    except (SessionMutationBusy, SessionMutationExtensionError) as exc:
-        raise _mutation_http_error(exc) from exc
+        result = await _run_coordinated_http_mutation(profile, session_id, ("delete",),
+            lambda: _mutate_session_request(request, profile, session_id,
+                request_id=request_id, expected_revision=expected_revision,
+                expected_generation=expected_generation, operation='delete', payload={}))
+    except HTTPException as exc:
+        # Already-absent is an idempotent success: the desktop optimistically removes the row
+        # and RESTORES it on any error, so a 404 resurrected ghost rows (a row deleted by
+        # another client between the sidebar snapshot and this DELETE). An exact retry of the
+        # caller's own committed request never reaches here: mutate_session checks the receipt
+        # before resolving the id, so it replays that receipt (or 409s on a changed digest).
+        # The authority also answers ``not_found`` for an EXISTING cold row it cannot restore
+        # (e.g. an API-server row without its binding); that row was not deleted, so only a
+        # genuinely absent id is the idempotent success.
+        if exc.status_code == 404 and exc.detail == 'not_found' and await asyncio.to_thread(
+                _with_db, profile, lambda db: db.get_session(session_id) is None, read_only=True):
+            return {"ok": True, "already_absent": True}
+        raise
+    # The canonical delete retires rows only: scrub each deleted session's on-disk artifacts
+    # (secret-bearing ``session_<id>.json`` snapshots, ``request_dump_<id>_*.json``) as the CLI
+    # delete path does (#60207). Idempotent, so an exact retry of the receipt repeats it safely.
+    sessions_dir = _session_files_dir(profile)
+    for sid in result.get('deleted_ids') or ():
+        await asyncio.to_thread(SessionDB._remove_session_files, sessions_dir, str(sid))
+    return result
+
+
+def _owner_db_for(request: Request, profile: Optional[str]):
+    """The live owner's own store for *profile* when a composed gateway serves it, else None."""
+    runner = getattr(request.app.state, "gateway_runner", None)
+    if runner is None:
+        return None
+    from gateway.session_authorities import authority_for_home
+    from hermes_state import _default_db_path
+    home = Path(_cron_profile_home(profile)[1]) if profile else Path(_default_db_path()).parent
+    authority = authority_for_home(runner, home)
+    return getattr(authority, "db", None)
 
 
 @manage_router.post("/api/sessions/owner-backfill")
-async def backfill_session_owner_profiles(body: SessionOwnerBackfill):
+async def backfill_session_owner_profiles(body: SessionOwnerBackfill, request: Request):
     """Stamp legacy ``profile_name = NULL`` rows with the serving-profile identity.
 
     A multi-connection Desktop fails closed on unowned rows.  Each ``state.db``
@@ -885,9 +980,15 @@ async def backfill_session_owner_profiles(body: SessionOwnerBackfill):
 
     with http_failure(
         "POST /api/sessions/owner-backfill failed", 500, detail="Internal server error"):
-        stamped = await asyncio.to_thread(
-            _with_db, body.profile, lambda db: db.backfill_null_session_profiles(stamp),
-            read_only=False)
+        owner_db = _owner_db_for(request, body.profile)
+        if owner_db is not None:
+            # A live gateway owns this store: it is the only writer (the offline maintenance lock
+            # would 409 every Desktop boot), so the idempotent stamp runs on its own connection.
+            stamped = await asyncio.to_thread(owner_db.backfill_null_session_profiles, stamp)
+        else:
+            stamped = await asyncio.to_thread(
+                _with_db, body.profile, lambda db: db.backfill_null_session_profiles(stamp),
+                read_only=False)
 
     if stamped:
         _log.info(
@@ -896,60 +997,18 @@ async def backfill_session_owner_profiles(body: SessionOwnerBackfill):
     return {"ok": True, "stamped": stamped, "profile": stamp}
 
 
-# PATCH /api/sessions/{id} flag -> SessionDB setter, applied in this order.
-_RENAME_FLAG_SETTERS = (
-    ("archived", lambda db, sid, v: db.set_session_archived(sid, v)),
-    ("hidden", lambda db, sid, v: db.set_session_hidden(sid, v)),
-    ("pinned", lambda db, sid, v: db.set_session_pinned(sid, v)),
-    ("unread", lambda db, sid, v: db.set_session_read(sid, read=not v)),
-)
-
-
 @manage_router.patch("/api/sessions/{session_id}")
-async def rename_session_endpoint(session_id: str, body: SessionRename):
-    """Update ``title`` (empty clears) and/or the flags; ``pinned`` exempts from
-    the auto-archive sweep, ``unread=False`` marks read up to now."""
-    flags = [flag for flag, _ in _RENAME_FLAG_SETTERS]
-
-    def _update(db):
-        sid = _resolve_session_id(db, session_id)
-        if not sid:
-            raise HTTPException(status_code=404, detail=_NOT_FOUND)
-        if body.title is None and all(getattr(body, f) is None for f in flags):
-            raise HTTPException(
-                status_code=400,
-                detail="Nothing to update; provide 'title', 'archived', 'hidden', 'pinned', and/or 'unread'.",
-            )
-        if body.title is not None:
-            try:
-                db.set_conversation_title(sid, body.title or "")
-            except ValueError as e:
-                # Title too long, invalid characters, or already in use.
-                raise HTTPException(status_code=400, detail=str(e))
-        result = {"ok": True, "title": None}
-        for flag, setter in _RENAME_FLAG_SETTERS:
-            value = getattr(body, flag)
-            if value is not None:
-                setter(db, sid, value)
-                result[flag] = bool(value)
-        app_chat_id, tip_id, _lineage = db.get_compression_conversation(sid)
-        result["app_chat_id"] = app_chat_id
-        result["title"] = db.get_session_title(tip_id) or ""
-        return result
-
-    actions = tuple(
-        action for action, active in (
-            ("rename", body.title is not None),
-            ("archive" if body.archived else "restore", body.archived is not None),
-        ) if active
-    )
-    try:
-        return await asyncio.to_thread(
-            _run_coordinated_mutation_for_ids, body.profile, (session_id,), actions,
-            lambda: _with_db(body.profile, _update, read_only=False),
-        )
-    except (SessionMutationBusy, SessionMutationExtensionError) as exc:
-        raise _mutation_http_error(exc) from exc
+async def rename_session_endpoint(session_id: str, body: SessionRename, request: Request):
+    """Title and sidebar flags share one authoritative revision and receipt."""
+    from hermes_cli.web_server_sessions import _mutate_session_request
+    payload = {key: getattr(body, key) for key in ('title', 'archived', 'hidden', 'pinned', 'unread')
+               if getattr(body, key) is not None}
+    actions = tuple(action for field, action in (('title', 'rename'), ('archived',
+        'archive' if body.archived else 'restore')) if field in payload)
+    return await _run_coordinated_http_mutation(body.profile, session_id, actions,
+        lambda: _mutate_session_request(request, body.profile, session_id,
+            request_id=body.request_id, expected_revision=body.expected_revision,
+            expected_generation=body.expected_generation, operation='sidebar', payload=payload))
 
 
 def _compact_json(obj) -> str:
@@ -995,9 +1054,11 @@ async def export_session_endpoint(session_id: str, profile: Optional[str] = None
 @manage_router.post("/api/sessions/prune")
 async def prune_sessions_endpoint(body: SessionPrune):
     """Delete ended sessions matching filters without blocking the event loop."""
-    if not body.dry_run:
-        # Same destructive rule as the rest of the family; a dry run deletes nothing, so it
-        # keeps working unnamed (it is the preview the confirm dialog reads).
-        body = body.model_copy(update={
-            "profile": destructive_profile(body.profile, "POST /api/sessions/prune")})
-    return await asyncio.to_thread(_prune_sessions, body)
+    if body.dry_run:
+        return await asyncio.to_thread(_prune_sessions, body)
+    # Same destructive rule as the rest of the family; a dry run deletes nothing, so it
+    # keeps working unnamed (it is the preview the confirm dialog reads).
+    body = body.model_copy(update={
+        "profile": destructive_profile(body.profile, "POST /api/sessions/prune")})
+    from hermes_cli.web_server_sessions import _with_session_maintenance
+    return await asyncio.to_thread(_with_session_maintenance, body.profile, _prune_sessions, body)

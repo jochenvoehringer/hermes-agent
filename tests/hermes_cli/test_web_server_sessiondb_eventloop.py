@@ -129,50 +129,48 @@ def test_session_read_handlers_run_sessiondb_work_off_event_loop(monkeypatch, ca
     assert all(thread_id != loop_thread for thread_id in db_threads)
 
 
-def test_session_rename_runs_writer_open_and_update_off_event_loop(monkeypatch):
-    loop_thread = threading.get_ident()
-    db_threads: list[int] = []
+def test_session_rename_runs_writer_open_and_update_off_event_loop(monkeypatch, tmp_path):
+    """Main's rename fix (1769024ca3b) ported to the unified runtime: the PATCH still opens no
+    second SessionDB writer (the owning authority applies the ``sidebar`` mutation), and that
+    authority's SQLite transaction runs off the event loop thread."""
+    from types import SimpleNamespace
 
-    class _DB:
-        def resolve_session_id(self, sid):
-            db_threads.append(threading.get_ident())
-            return sid
+    import gateway.session_mutations as _mutations
+    from gateway.session_authority import LiveSession, SessionAuthority
+    from gateway.session_contract import SessionActor
+    from hermes_state import SessionDB
+    from hermes_state_runtime import begin_runtime_epoch
 
-        def get_compression_conversation(self, sid):
-            db_threads.append(threading.get_ident())
-            return sid, sid, [sid]
+    read_threads: list[int] = []
 
-        def get_session(self, sid):
-            db_threads.append(threading.get_ident())
-            return {"id": sid, "source": "ios"}
+    def _open_db(*_args, read_only):
+        assert read_only is True, "rename must not open its own SessionDB writer"
+        read_threads.append(threading.get_ident())
+        return SessionDB(db_path=tmp_path / "state.db", read_only=True)
 
-        def set_conversation_title(self, sid, title):
-            db_threads.append(threading.get_ident())
-            assert (sid, title) == ("sess-1", "renamed")
+    write_threads: list[int] = []
+    commit = _mutations.mutate_runtime_session
 
-        def get_session_title(self, sid):
-            db_threads.append(threading.get_ident())
-            assert sid == "sess-1"
-            return "renamed"
+    def _recording_commit(*args, **kwargs):
+        write_threads.append(threading.get_ident())
+        return commit(*args, **kwargs)
 
-        def close(self):
-            db_threads.append(threading.get_ident())
+    with SessionDB(db_path=tmp_path / "state.db") as db:
+        db.create_session("sess-1", source="cli")
+        authority = SessionAuthority(SimpleNamespace(_draining=False), profile_id="p", instance_id="owner",
+                                     db=db, epoch=begin_runtime_epoch(db, instance_id="owner"))
+        authority.sessions["sess-1"] = LiveSession(None, "route")
+        actor = SessionActor("owner", "p", frozenset({"session:read", "session:control"}), "http")
+        monkeypatch.setattr(_web_server_sessions, "_open_session_db_for_profile", _open_db)
+        monkeypatch.setattr(_web_server_sessions, "_session_mutation_context", lambda request, profile: (authority, actor))
+        monkeypatch.setattr(_mutations, "mutate_runtime_session", _recording_commit)
 
-    def _open_db(profile=None, *, read_only):
-        db_threads.append(threading.get_ident())
-        assert profile is None
-        return _DB()
+        async def _rename():
+            body = _web_models.SessionRename(title="renamed", request_id="req-1", expected_revision=0)
+            return threading.get_ident(), await _rt_sessions.rename_session_endpoint("sess-1", body, request=object())
 
-    monkeypatch.setattr(_web_server_sessions, "_open_session_db_for_profile", _open_db)
-    monkeypatch.setattr(_rt_sessions, "_resolve_session_id", lambda db, sid: sid)
-    monkeypatch.setattr(_rt_sessions, "_serving_profile", lambda profile: "default")
-
-    result = asyncio.run(
-        _rt_sessions.rename_session_endpoint(
-            "sess-1", _web_models.SessionRename(title="renamed")
-        )
-    )
-
-    assert result == {"ok": True, "title": "renamed", "app_chat_id": "sess-1"}
-    assert db_threads
-    assert all(thread_id != loop_thread for thread_id in db_threads)
+        loop_thread, result = asyncio.run(_rename())
+        assert result["ok"] is True and result["title"] == "renamed"
+        assert db.get_session("sess-1")["title"] == "renamed"
+    assert write_threads and all(thread_id != loop_thread for thread_id in write_threads)
+    assert read_threads and all(thread_id != loop_thread for thread_id in read_threads)

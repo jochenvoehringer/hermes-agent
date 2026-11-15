@@ -28,17 +28,18 @@ import os
 import sys
 
 __all__ = [
-    "project_root_str", "normalize_hermes_home_env",
-    "ensure_project_root_on_path",
-    "is_global_fast_version_argv",
-    "is_container_startup_environment",
     "active_profile_may_override_home",
     "container_mode_may_be_active",
-    "read_openai_version",
-    "read_install_method",
-    "print_fast_version_info",
-    "try_fast_version",
+    "ensure_project_root_on_path",
+    "is_container_startup_environment",
     "is_desktop_ssh_backend_argv",
+    "is_global_fast_version_argv",
+    "normalize_hermes_home_env",
+    "print_fast_version_info",
+    "project_root_str",
+    "read_install_method",
+    "read_openai_version",
+    "try_fast_version",
 ]
 
 
@@ -224,8 +225,12 @@ def print_fast_version_info(*, check_updates: bool = True) -> None:
         from hermes_cli.source_check import UPDATE_AVAILABLE_NO_COUNT, check_for_updates
         from hermes_cli.config import recommended_update_command
 
-        behind = check_for_updates(passive=True).get("behind")
-        if behind == UPDATE_AVAILABLE_NO_COUNT:
+        status = check_for_updates(passive=True)
+        behind = status.get("behind")
+        if status.get("rollback"):
+            print(f"Newer than stable release v{status.get('sourceVersion')} — "
+                  f"'{recommended_update_command()}' moves back to it")
+        elif behind == UPDATE_AVAILABLE_NO_COUNT:
             print(f"Update available — run '{recommended_update_command()}'")
         elif behind and behind > 0:
             commits_word = "commit" if behind == 1 else "commits"
@@ -253,3 +258,25 @@ def try_fast_version(argv: list[str] | None = None) -> bool:
 
     print_fast_version_info()
     return True
+
+
+def explicit_home_overrides_profile(hermes_home_env: str, argv: list[str]) -> bool:
+    """Keep explicit profile homes and config edits on the requested home."""
+    from hermes_cli._parser import top_level_value_flag_sets
+
+    value_flags, optional_value_flags = top_level_value_flag_sets()
+    top_level_command = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            break
+        takes_value = "=" not in arg and i + 1 < len(argv) and (
+            arg in value_flags
+            or (arg in optional_value_flags and not argv[i + 1].startswith("-"))
+        )
+        if not takes_value and not arg.startswith("-"):
+            top_level_command = arg
+            break
+        i += 2 if takes_value else 1
+    return os.path.basename(os.path.dirname(os.path.normpath(hermes_home_env))) == "profiles" or top_level_command == "config"
