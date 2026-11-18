@@ -2050,3 +2050,9 @@ for _m in (
     _methods_i18n, _methods_machine, _methods_shared_metrics, _methods_plugin_catalog):
     _m.register(sys.modules[__name__])
 del _m
+
+# Plugins can register before or after this module loads. Install only after
+# every split handler has been rebound onto the initialized server namespace.
+from tui_gateway.rpc_extensions import install_rpc_extensions
+
+install_rpc_extensions(sys.modules[__name__])
