@@ -268,6 +268,8 @@ async def write_mutation(authority, ref, params, editor_servers, *, principal_id
             if operation == 'delete':
                 from gateway.session_onboarding import ending_run_on_delete
                 commit = partial(ending_run_on_delete, authority.db, ref.session_id, commit)
+            from tui_gateway.session_mutation_extensions import coordinate_session_mutation
+            commit = partial(coordinate_session_mutation, authority.db, authority.profile_id, params, commit)
             try:
                 result = await asyncio.to_thread(commit)
             finally:

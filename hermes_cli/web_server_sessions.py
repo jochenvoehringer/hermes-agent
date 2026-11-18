@@ -176,10 +176,13 @@ def _mutate_offline_store(profile, actor, params):
                 row = conn.execute('SELECT epoch FROM runtime_epoch WHERE singleton=1').fetchone()
             # The reservation held here is the ownership lock begin_runtime_epoch requires.
             epoch = row[0] if row else begin_runtime_epoch(db, instance_id='dashboard-offline')
-            return mutate_runtime_session(db, epoch=epoch, principal_id=actor.subject,
+            from functools import partial
+            from tui_gateway.session_mutation_extensions import coordinate_session_mutation
+            commit = partial(mutate_runtime_session, db, epoch=epoch, principal_id=actor.subject,
                 expected_generation=params.get('expected_generation'), _authorize_write=write_guard,
                 **{key: params[key] for key in ('session_id', 'request_id', 'expected_revision',
                                                 'operation', 'payload')})
+            return coordinate_session_mutation(db, profile, params, commit)
         finally:
             db.close()
     return _with_session_maintenance(profile, run)

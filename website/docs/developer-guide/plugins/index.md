@@ -1638,6 +1638,21 @@ The **API request hooks** are observers for the raw provider request, one level 
 
 Every name in `hermes_cli.plugins.VALID_HOOKS` has at least one core fire site. This table names the function that fires each one, so you can read the exact call and payload. Paths are relative to the repository root. When you add a hook, add its row here in the same change.
 
+Local integration hooks also include `pre_prompt_dispatch` (TUI prompt admission) and
+`kanban_completion_acceptance` (trusted controller completion receipts).
+`pre_prompt_dispatch` receives immutable session identifiers, source, text, and image paths;
+callbacks return `allow` or `respond` with an optional handler id. An image turn naming a
+required handler is blocked when that handler returns no valid directive. The gateway persists
+plugin responses without running the model. A controller callback receives contract, task,
+assignee, and run identity; completion requires exactly one matching successful receipt with
+a full commit SHA. Exceptions and ambiguous receipts fail closed.
+
+`pre_prompt_dispatch`, `required_prompt_handler`, and `reject_if_busy` apply to the
+legacy TUI RPC used by the HOPPE app adapter. They are not parameters of the
+canonical `hermes-gateway-v1` create/submit API. Canonical session mutations keep
+their existing authority, revision and generation checks; the local mutation
+extension wraps that commit instead of replacing the native protocol.
+
 | Hook | Fired by |
 |------|----------|
 | `pre_tool_call` | `hermes_cli/plugins.py` `_dispatch_pre_tool_call_hooks`, called from `agent/tool_executor.py` `_pre_tool_block`, `agent/agent_runtime_helpers.py` `_pre_tool_block_message` and `model_tools.py` `_pre_dispatch_guards` |

@@ -81,6 +81,7 @@ class LiveSessionSnapshot(Result):
     stored_session_id: str | None = None
     resumed: str | None = None
     session_key: str | None = None
+    required_prompt_handler: str | None = None
     messages_omitted: bool | None = None
     hydrating: bool | None = None
     running: bool | None = None
@@ -137,6 +138,7 @@ class SessionCreateParams(ProfileParams):
     # #65410: stable caller-chosen key so a retried create (response lost in
     # transit) returns the SAME session instead of a duplicate child.
     idempotency_key: str | None = None
+    required_prompt_handler: str | None = None
 
 
 class SessionCreateResult(Result):
@@ -145,6 +147,7 @@ class SessionCreateResult(Result):
     message_count: int
     messages: list[TranscriptMessage]
     info: SessionLiveInfo
+    required_prompt_handler: str | None = None
 
 
 method("session.create", params=SessionCreateParams, result=SessionCreateResult,
@@ -192,6 +195,7 @@ class SessionResumeParams(SessionParams):
     # False: render image parts as "[image]" instead of their data URIs — a remote client reads a
     # transcript in kilobytes instead of re-transmitting every stored attachment (#116511).
     inline_images: bool = True
+    required_prompt_handler: str | None = None
 
 
 class SessionResumeResult(LiveSessionSnapshot):

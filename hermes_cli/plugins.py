@@ -142,7 +142,13 @@ VALID_HOOKS: set[str] = {
     # pre_gateway_dispatch: once per incoming MessageEvent, after the internal-event guard, BEFORE
     # auth/pairing and dispatch. Kwargs: event, gateway, session_store. Return {"action": "skip",
     # "reason"} -> drop; {"action": "rewrite", "text"} -> replace event.text; "allow"/None -> normal.
-    "pre_gateway_dispatch", "post_gateway_admission",  # post_*: fail-open consume, gateway/run_inbound_consumer.py
+    "pre_gateway_dispatch",
+    "post_gateway_admission",  # post_*: fail-open consume, gateway/run_inbound_consumer.py
+    # TUI/Desktop turn gate. Runs on the turn worker after attached-image
+    # snapshotting and before provider-specific image routing or agent dispatch.
+    # Plugins return allow/respond directives without receiving private gateway
+    # or session objects.
+    "pre_prompt_dispatch",
     # agent_loop_stopped: an agent turn was interrupted mid-run (/stop, or the running-agent
     # fast-path of /new; see gateway/run.py::_interrupt_and_clear_session). Kwargs: session_key,
     # platform, reason, invalidation_reason. Return values are ignored.
@@ -166,6 +172,8 @@ VALID_HOOKS: set[str] = {
     # spawn; completed/blocked fire in the WORKER (or whichever process drove it). Kwargs: task_id,
     # board, assignee, run_id, profile_name; completed adds summary, blocked adds reason.
     "kanban_task_claimed", "kanban_task_completed", "kanban_task_blocked",
+    # Explicit controller:NAME contracts. Exactly one matching trusted receipt is required.
+    "kanban_completion_acceptance",
     # Kanban worker/mutation/tick observers; returns ignored; fire sites short-circuit on
     # has_hook(). Kwargs: task_id, profile_name, board, assignee, run_id plus, per hook:
     # worker_spawned (DISPATCHER, after PID persisted, inside the dispatch lock — stay fast):

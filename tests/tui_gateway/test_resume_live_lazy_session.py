@@ -16,9 +16,12 @@ Contract:
 
 from __future__ import annotations
 
+from time import monotonic, sleep
+
 import pytest
 
 import tui_gateway.server as srv
+from tui_gateway.transport import FanoutTransport, bind_transport, reset_transport
 
 
 @pytest.fixture
@@ -76,6 +79,56 @@ def test_unscoped_resume_of_profile_session_fails_closed(live_lazy_session):
 def test_unknown_id_still_404s(home):
     out = _resume({"profile": "ops", "session_id": "ghost-9999", "omit_messages": True})
     assert out.get("error", {}).get("code") == 4007
+
+
+def test_live_ios_observers_survive_idle_reap_scan_and_resume(live_lazy_session, monkeypatch):
+    """A live observer prevents cold reap; resume joins the existing fanout."""
+    sid, record = live_lazy_session
+
+    class Peer:
+        _closed = False
+
+        def __init__(self):
+            self.frames = []
+
+        def write(self, frame):
+            self.frames.append(frame)
+            return True
+
+        def close(self):
+            self._closed = True
+
+    ios_observer, desktop_observer, reconnecting_ios = Peer(), Peer(), Peer()
+    fanout = FanoutTransport(ios_observer, desktop_observer)
+    record.update(transport=fanout, created_at=1.0, last_active=1.0, lazy=True)
+    monkeypatch.setattr(srv, "_SESSION_TTL_S", 1.0)
+    monkeypatch.setattr(srv, "_session_has_active_delegations", lambda *_args: False)
+
+    try:
+        assert srv._close_session_by_id(
+            sid, end_reason="idle_timeout",
+            predicate=lambda current: srv._session_is_evictable(sid, current, 100.0),
+        ) is False
+        assert srv._sessions[sid] is record
+
+        token = bind_transport(reconnecting_ios)
+        try:
+            resumed = _resume({"profile": "ops", "session_id": record["session_key"], "omit_messages": True})
+        finally:
+            reset_transport(token)
+
+        assert "error" not in resumed, resumed
+        assert resumed["result"]["session_id"] == sid
+        assert fanout.contains(reconnecting_ios)
+        frame = {"method": "event", "params": {"type": "message.complete"}}
+        assert fanout.write(frame)
+        for peer in (ios_observer, desktop_observer, reconnecting_ios):
+            deadline = monotonic() + 2.0
+            while not peer.frames and monotonic() < deadline:
+                sleep(0.001)
+            assert peer.frames == [frame]
+    finally:
+        fanout.close()
 
 
 class _Agent:

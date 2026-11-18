@@ -264,15 +264,17 @@ class TestNotificationPollerLoopKanbanWiring:
 
         emits: list = []
         submits: list = []
+        from contextlib import contextmanager
+        @contextmanager
+        def session_db(sess):
+            yield SimpleNamespace(append_messages_batch=lambda key, rows: submits.extend(row["content"] for row in rows if row["role"] == "assistant"))
+        monkeypatch.setattr(server, "_session_db", session_db)
         monkeypatch.setattr(server, "_KANBAN_POLL_SECONDS", 0.01)
         monkeypatch.setattr(
             server, "_emit", lambda event, sid, payload=None: emits.append((event, payload))
         )
-        def accept(rid, sid, sess, text):
-            # Model execution is replaced, including its concrete admission receipt.
-            server._emit("message.start", sid)
-            submits.append(text)
-            return True
+        def accept(*args, **kwargs):
+            raise AssertionError("kanban notices must never invoke the model")
         monkeypatch.setattr(server, "_run_prompt_submit", accept)
         stop = threading.Event()
         thread = threading.Thread(
@@ -301,6 +303,8 @@ class TestNotificationPollerLoopKanbanWiring:
             "session_key": SESSION_KEY,
             "history_lock": threading.Lock(),
             "running": running,
+            "history": [],
+            "_kanban_stray_keys": (),
         }
 
     def test_idle_session_gets_status_update_and_agent_turn(self, monkeypatch):
@@ -319,7 +323,9 @@ class TestNotificationPollerLoopKanbanWiring:
         assert any(tid in t for t in status_texts), status_texts
         assert any(e == "message.start" for e, _ in emits)
         assert any(tid in text for text in submits), submits
-        assert session["running"] is True  # poller claimed the turn
+        assert session["running"] is False
+        assert session["history"][-1]["role"] == "assistant"
+        assert any(e == "message.complete" for e, _ in emits)
         assert not session.get("_kanban_pending")
 
     def test_busy_session_buffers_then_flushes_when_idle(self, monkeypatch):
@@ -347,4 +353,53 @@ class TestNotificationPollerLoopKanbanWiring:
 
         assert any(tid in text for text in submits), submits
         assert session["_kanban_pending"] == []
-        assert session["running"] is True
+        assert session["running"] is False
+
+
+def test_notification_refuses_foreign_transcript_owner(monkeypatch):
+    from tui_gateway import server
+    import threading
+    from contextlib import contextmanager
+    writes = []
+    @contextmanager
+    def database(session):
+        yield SimpleNamespace(append_messages_batch=lambda *args: writes.append(args))
+    monkeypatch.setattr(server, "_collect_kanban_notifications", lambda session: ["done"])
+    monkeypatch.setattr(server, "_session_db", database)
+    monkeypatch.setattr(server, "_reclaim_idle_released_lease", lambda session: "foreign owner")
+    session = {"session_key": "owned-elsewhere", "history_lock": threading.RLock(), "history": []}
+    monkeypatch.setattr(server, "_emit", lambda *args: True)
+    server._notif_poll_kanban_scoped("sid", session)
+    assert not writes and not session["history"]
+    assert session["_kanban_pending"] == ["done"]
+    assert session["running"] is False
+
+
+def test_real_event_emitter_preserves_stream_stamp(monkeypatch):
+    from tui_gateway import server
+    frames = []
+    monkeypatch.setattr(server, "write_json", lambda frame: frames.append(frame) or True)
+    assert server._emit("status.update", "unregistered-test", {"kind": "status", "text": "ready"})
+    assert frames[0]["params"]["payload"]["text"] == "ready"
+
+
+def test_muted_diagnostic_is_persisted_hidden_without_message_events(monkeypatch):
+    import threading
+    from contextlib import contextmanager
+    from gateway import warning_notifications as policy
+    from tui_gateway import server
+    rows, events = [], []
+    @contextmanager
+    def database(session):
+        yield SimpleNamespace(append_messages_batch=lambda key, batch: rows.extend(batch))
+    monkeypatch.setattr(policy, "warning_notifications_enabled", lambda *args: False)
+    monkeypatch.setattr(server, "_collect_kanban_notifications", lambda session: [policy.DiagnosticText("warning")])
+    monkeypatch.setattr(server, "_session_db", database)
+    monkeypatch.setattr(server, "_require_transcript_owner", lambda session: None)
+    monkeypatch.setattr(server, "_emit", lambda event, *args: events.append(event))
+    session = {"session_key": "diagnostic", "history_lock": threading.RLock(), "history": []}
+    server._notif_poll_kanban_scoped("sid", session)
+    assert rows == session["history"]
+    assert rows[0]["display_kind"] == "hidden"
+    assert rows[0]["display_metadata"] == {"notification_category": "diagnostic"}
+    assert not events

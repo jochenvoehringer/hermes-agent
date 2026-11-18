@@ -45,6 +45,7 @@ from agent.compaction_display import project_compaction_message_for_display
 from agent.skill_commands import describe_skill_invocation
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from tui_gateway import git_probe, stream_segments
+from tui_gateway.prompt_dispatch_hooks import invoke_pre_prompt_dispatch
 from tui_gateway.checkpoints import (_load_checkpoints_enabled, _resolve_checkpoint_hash,
                                      resolve_checkpoints_enabled as _resolve_checkpoints_enabled)
 from tui_gateway._env import env_float, env_int
@@ -591,11 +592,29 @@ def _event_frame(event: str, sid: str, payload: dict | None = None) -> dict:
     return {"jsonrpc": "2.0", "method": "event", "params": params}
 
 
+from tui_gateway.session_subscribers import SessionSubscriberHub
+
+_session_subscribers = SessionSubscriberHub()
+
+
 def _emit(event: str, sid: str, payload: dict | None = None) -> bool:
     from agent.notification_presentation import event_presentation_muted
     if event_presentation_muted(event, sid):
         return False
-    return write_json(_event_frame(event, sid, stream_segments.stamp_session_frame(_sessions.get(sid), event, payload)))
+    frame = _event_frame(event, sid, stream_segments.stamp_session_frame(_sessions.get(sid), event, payload))
+    wrote = write_json(frame)
+    session = _sessions.get(sid)
+    if session is not None:
+        runtime_id = str(session.get("session_key") or sid)
+        primary = session.get("transport") or current_transport()
+        with contextlib.suppress(Exception):
+            wrote = _session_subscribers.broadcast_secondary(runtime_id, primary, frame) or wrote
+        if event == "hoppe.chat.session_rotated" and isinstance(payload, dict):
+            app_chat_id = str(payload.get("app_chat_id") or "")
+            new_runtime_id = str(payload.get("session_id") or "")
+            if app_chat_id and new_runtime_id:
+                _session_subscribers.move_runtime(runtime_id, new_runtime_id, app_chat_id)
+    return wrote
 
 
 from tui_gateway import server_requests as _server_requests
@@ -628,6 +647,8 @@ def unregister_live_transport(transport: Transport | None) -> None:
     with _live_transports_lock:
         _live_transports.discard(transport)
     _server_requests.forget(transport)
+    if transport is not None:
+        _session_subscribers.unsubscribe_transport(transport)
 
 
 def _broadcast_global_event(event: str, payload: dict | None = None, *, skip=frozenset()) -> None:

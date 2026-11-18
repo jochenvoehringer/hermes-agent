@@ -11,6 +11,39 @@ from hermes_state_runtime import begin_runtime_epoch
 
 
 @pytest.mark.asyncio
+async def test_app_extension_can_refuse_canonical_mutation_without_committing(tmp_path):
+    from tui_gateway.session_mutation_extensions import (
+        register_session_mutation_extension, SessionMutationBusy,
+    )
+    with SessionDB(db_path=tmp_path / 'state.db') as db:
+        db.create_session('s', source='ios')
+        epoch = begin_runtime_epoch(db, instance_id='current')
+        authority = SessionAuthority(SimpleNamespace(_draining=False), profile_id='hoppe',
+                                     instance_id='current', db=db, epoch=epoch)
+        authority.sessions['s'] = LiveSession(None, 'route')
+        owner = AuthorityConnection(authority, object(), {'user_id': 'owner'})
+        before = db.get_session('s')['runtime_revision']
+        requests = []
+        def extension(request):
+            requests.append(request)
+            def blocked(mutation):
+                raise SessionMutationBusy('chat_busy')
+            return blocked
+        unregister = register_session_mutation_extension('app-test', extension)
+        try:
+            result = await owner.dispatch({'id': 7, 'method': 'session.mutate', 'params': {
+                'session_id': 's', 'request_id': 'rename-1', 'expected_revision': before,
+                'operation': 'rename', 'payload': {'title': 'Uncommitted'}}})
+            assert result['error']['message'] == 'session_busy', result
+            assert db.get_session('s')['runtime_revision'] == before
+            assert not db.get_session('s')['title']
+            assert [(r.profile, r.source, r.action) for r in requests] == [('hoppe', 'ios', 'rename')]
+        finally:
+            unregister()
+            await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_mutation_rpc_fences_retries_and_competing_viewers(tmp_path):
     with SessionDB(db_path=tmp_path / 'state.db') as db:
         db.create_session('s', source='test')

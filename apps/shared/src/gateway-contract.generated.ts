@@ -2863,6 +2863,7 @@ export interface PromptSubmitParams {
   text?: unknown
   display_kind?: string | null
   interrupted?: boolean | null
+  reject_if_busy?: boolean | null
   queued?: boolean | null
   surface?: string | null
   voice_context?: string | null
@@ -3211,6 +3212,7 @@ export interface SessionCreateParams {
   room_plumbing?: boolean
   follow_profile_config?: boolean
   idempotency_key?: string | null
+  required_prompt_handler?: string | null
 }
 /** One create-time transcript row (``session_history._coerce_seed_history``); ``text`` is the legacy alias of ``content``; only ``display_kind: "hidden"`` is accepted from the wire. Clients forward stored rows verbatim (``_row_id``, ``timestamp``, …) and the coercer drops what it does not use, so the row stays open. */
 export interface SeedMessage {
@@ -3226,6 +3228,7 @@ export interface SessionCreateResult {
   message_count: number
   messages: TranscriptMessage[]
   info: SessionLiveInfo
+  required_prompt_handler?: string | null
 }
 /** One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``): ``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id`` rewind targets, and for tool rows raw ``content``, ``tool_call_id``, ``name``, ``context`` and ``args``. Assistant detail sidecars (``reasoning``, …) ride as extra keys. */
 export interface TranscriptMessage {
@@ -3283,6 +3286,7 @@ export interface SessionResumeParams {
   eager_build?: boolean
   close_on_disconnect?: boolean
   inline_images?: boolean
+  required_prompt_handler?: string | null
 }
 export interface SessionResumeResult {
   session_id: string
@@ -3292,6 +3296,7 @@ export interface SessionResumeResult {
   stored_session_id?: string | null
   resumed?: string | null
   session_key?: string | null
+  required_prompt_handler?: string | null
   messages_omitted?: boolean | null
   hydrating?: boolean | null
   running?: boolean | null
@@ -3367,6 +3372,7 @@ export interface SessionActivateResult {
   stored_session_id?: string | null
   resumed?: string | null
   session_key?: string | null
+  required_prompt_handler?: string | null
   messages_omitted?: boolean | null
   hydrating?: boolean | null
   running?: boolean | null

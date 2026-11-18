@@ -16,6 +16,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
+_CONTROLLER = re.compile(r"controller:[a-z][a-z0-9-]{0,63}")
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
 
@@ -23,8 +24,8 @@ _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([
 def validate_contract(value: str | None) -> str:
     if value is None or value == "local-only":
         return "local-only"
-    if not isinstance(value, str) or not (_REPO.fullmatch(value) or _PR.fullmatch(value)):
-        raise ValueError("completion_contract must be local-only, OWNER/REPO, or an exact GitHub PR URL")
+    if not isinstance(value, str) or not (_REPO.fullmatch(value) or _PR.fullmatch(value) or _CONTROLLER.fullmatch(value)):
+        raise ValueError("completion_contract must be local-only, OWNER/REPO, an exact GitHub PR URL, or controller:NAME")
     return value
 
 

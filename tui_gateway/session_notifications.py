@@ -600,7 +600,7 @@ def _notif_poll_kanban(sid: str, session: dict) -> None:
 
 
 def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
-    """One kanban poll: emit new texts, buffer them, and run the buffered batch as a turn if idle. Events are
+    """One kanban poll: emit new texts, buffer them, and persist the buffered batch as assistant messages if idle. Events are
     cursor-claimed (never re-queued), so they wait in the buffer instead of dropping the agent turn."""
     try:
         texts = _collect_kanban_notifications(session)
@@ -622,10 +622,31 @@ def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
         diagnostic = split and isinstance(pending[0], DiagnosticText)
         batch = [text for text in pending if not split or isinstance(text, DiagnosticText) == diagnostic]
         session["_kanban_pending"] = [text for text in pending if split and isinstance(text, DiagnosticText) != diagnostic]
-    with contextlib.suppress(Exception):
-        _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(batch),
-                      "kanban notification dispatch failed",
-                      **({"display_metadata": {"notification_category": "diagnostic"}} if diagnostic else {}))
+    claim = session.get("_notif_turn_claim")
+    answer = "\n".join(batch)
+    persisted = False
+    try:
+        row = {"role": "assistant", "content": answer}
+        if diagnostic:
+            row.update(display_kind="hidden", display_metadata={"notification_category": "diagnostic"})
+        with session["history_lock"]:
+            _require_transcript_owner(session)
+            with _session_db(session) as db:
+                if db is None:
+                    raise RuntimeError("session database unavailable")
+                db.append_messages_batch(session["session_key"], [row])
+            persisted = True
+            session.setdefault("history", []).append(row)
+        if not diagnostic:
+            _emit("message.start", sid)
+            _emit("message.complete", sid, {"text": answer})
+    except Exception as exc:
+        if not persisted:
+            with session["history_lock"]:
+                session["_kanban_pending"] = batch + session.get("_kanban_pending", [])
+        _notif_log_failure("kanban notification delivery failed", exc)
+    finally:
+        _notif_release_claim(session, claim)
 
 
 def _notif_defer_event(evt, claim, put=None):

@@ -192,6 +192,40 @@ def _expand_compression_lineage_ids(conn, frontier: list[str]) -> list[str]:
     return out
 
 
+def _append_owner_scope(where: list[str], params: list[Any], user_id: Optional[str]) -> None:
+    """Restrict a listing to one durable owner and fail closed on mixed compression chains."""
+    if user_id is None:
+        return
+    where.append("s.user_id = ?")
+    params.append(user_id)
+    where.append(
+        f"""NOT EXISTS (
+            WITH RECURSIVE owner_chain(id) AS (
+                SELECT child.id FROM sessions child
+                WHERE child.parent_session_id = s.id AND s.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
+                  AND NOT ({_RESET_CHILD_SQL.format(a='child')})
+                  AND COALESCE(child.source, '') != 'tool'
+                UNION
+                SELECT child.id FROM owner_chain chain_row
+                JOIN sessions parent ON parent.id = chain_row.id
+                JOIN sessions child ON child.parent_session_id = chain_row.id
+                WHERE parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
+                  AND NOT ({_RESET_CHILD_SQL.format(a='child')})
+                  AND COALESCE(child.source, '') != 'tool'
+            )
+            SELECT 1 FROM owner_chain
+            JOIN sessions owner_row ON owner_row.id = owner_chain.id
+            WHERE owner_row.user_id IS NOT ? OR owner_row.source IS NOT s.source
+        )"""
+    )
+    params.append(user_id)
+
+
+
 def _collect_delegate_child_ids(conn, parent_ids: list[str]) -> list[str]:
     """Delegate-subagent ids (``_delegate_from`` marker, walked recursively) to cascade-delete with
     *parent_ids*; untagged children stay orphaned, not deleted."""
@@ -1314,7 +1348,7 @@ class SessionSessionsMixin:
         id_query: str | None = None, search_query: str | None = None, compact_rows: bool = False,
         include_pinned: bool = False, session_key: str | None = None, include_hidden: bool = False,
         include_subagents: bool = False, local_created_sources: Sequence[str] | None = None,
-        workspace_key: str | None = None,
+        workspace_key: str | None = None, user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """List sessions with preview and ``last_active`` in one query. ``order_by_last_active`` sorts
         by the chain TIP via a recursive CTE (the only path honouring ``id_query`` / ``search_query``);
@@ -1332,6 +1366,7 @@ class SessionSessionsMixin:
             archived_only=archived_only, include_archived=include_archived, include_subagents=include_subagents,
             local_created_sources=local_created_sources, workspace_key=workspace_key,
         )
+        _append_owner_scope(where_clauses, params, user_id)
         # The archived-only view is the recovery surface for rows that dropped out of every
         # default list: a session that is archived AND hidden (Bot Mode marks its sessions
         # hidden) must still be reachable there, or nothing but direct DB access can bring
@@ -1441,6 +1476,7 @@ class SessionSessionsMixin:
                 include_subagents=include_subagents, local_created_sources=local_created_sources,
                 workspace_key=workspace_key,
             )
+            _append_owner_scope(pinned_clauses, pinned_params, user_id)
             if not include_hidden and not archived_only:
                 pinned_clauses.append("s.hidden = 0")
             if heads:
@@ -1843,10 +1879,84 @@ class SessionSessionsMixin:
             self._remove_session_files(sessions_dir, session_id)
         return deleted
 
+    def _delete_sessions_on_conn(
+        self, conn, session_ids, *, expected_delete_ids=None,
+        exclude_active_write_guards=False, skipped_ids=None,
+        include_compression_chain=False,
+    ):
+        """Current bulk-delete semantics inside the caller's write transaction."""
+        unique_ids = sorted({sid for sid in session_ids or () if isinstance(sid, str) and sid})
+        if not unique_ids:
+            return 0, []
+        removed_ids = []
+        existing = [row["id"] for chunk in _id_chunks(unique_ids) for row in conn.execute(
+            f"SELECT id FROM sessions WHERE id IN ({_session_ids_placeholders(chunk)})", chunk,
+        ).fetchall()]
+        if not existing:
+            return 0, []
+        from hermes_state_local import owned_lineage_ids
+
+        def expand(ids):
+            # A local reset/compression segment deletes as its whole conversation (delete_session).
+            if include_compression_chain:
+                return self._expand_compression_lineage(conn, ids)
+            return list(dict.fromkeys(x for sid in ids for x in owned_lineage_ids(conn, sid)))
+        # Expand BEFORE the guard pass so a guarded lineage member (active turn lease /
+        # compression lock anywhere in it) keeps its selected root listed too.
+        expanded = expand(existing)
+        guard_pool = [*expanded, *_collect_delegate_child_ids(conn, expanded)]
+        if exclude_active_write_guards:
+            # A root is skipped when it or any delegate child it would cascade is guarded, so the
+            # cascade below never deletes a guarded row reported back as kept. When the chain
+            # expansion is on, a guard on ANY lineage member keeps its selected root: deleting
+            # a torn chain would re-surface it (the root re-projects onto a surviving link).
+            # One batched check first; per-root attribution only when something is guarded.
+            active_ids: set = set()
+            if self._guarded_ids(conn, guard_pool):
+                if include_compression_chain:
+                    for sid in existing:
+                        member_lineage = set(self._expand_compression_lineage(conn, [sid]))
+                        member_lineage.add(sid)
+                        if self._guarded_ids(conn, [*member_lineage,
+                                *_collect_delegate_child_ids(conn, list(member_lineage))]):
+                            active_ids.add(sid)
+                else:
+                    active_ids = {
+                        sid for sid in existing
+                        if self._guarded_ids(conn, [*(members := expand([sid])),
+                                                    *_collect_delegate_child_ids(conn, members)])
+                    }
+            existing = [sid for sid in existing if sid not in active_ids]
+            if skipped_ids is not None:
+                skipped_ids.extend(sorted(active_ids))
+            if not existing:
+                return 0, []
+            expanded = expand(existing)
+        actual_ids = set(expanded) | set(_collect_delegate_child_ids(conn, expanded))
+        if expected_delete_ids is not None and actual_ids != set(expected_delete_ids):
+            return 0, []
+        from hermes_state_mutation_retirement import retire_sessions
+        retire_sessions(conn, expanded)
+        removed_ids.extend(_delete_delegate_children(conn, expanded))
+        for chunk in _id_chunks(expanded):
+            ph = _session_ids_placeholders(chunk)
+            conn.execute(  # orphan children whose parent is in the kill list (FK)
+                f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk,
+            )
+            conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
+            conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
+        self._delete_unreferenced_system_prompts(conn)
+        removed_ids.extend(expanded)
+        # Count the ids the CALLER asked for, not the expanded chain links —
+        # the dashboard toast should say "3 deleted" when the user selected
+        # 3 rows, however many physical links those rows had.
+        return len(existing), removed_ids
+
     def delete_sessions(
         self, session_ids: list[str], sessions_dir: Optional[Path] = None,
         exclude_active_write_guards: bool = False, skipped_ids: Optional[list[str]] = None,
         include_compression_chain: bool = False,
+        expected_delete_ids: Optional[list[str]] = None,
     ) -> int:
         """Bulk delete with :meth:`delete_session` semantics per row, in ONE transaction. Unknown ids
         are skipped (UI selection can race another tab's delete). With ``exclude_active_write_guards``, rows
@@ -1864,65 +1974,12 @@ class SessionSessionsMixin:
             return 0
         removed_ids: list[str] = []
         def _do(conn):
-            existing = [row["id"] for chunk in _id_chunks(unique_ids) for row in conn.execute(
-                f"SELECT id FROM sessions WHERE id IN ({_session_ids_placeholders(chunk)})", chunk,
-            ).fetchall()]
-            if not existing:
-                return 0
-            from hermes_state_local import owned_lineage_ids
-
-            def expand(ids):
-                # A local reset/compression segment deletes as its whole conversation (delete_session).
-                if include_compression_chain:
-                    return self._expand_compression_lineage(conn, ids)
-                return list(dict.fromkeys(x for sid in ids for x in owned_lineage_ids(conn, sid)))
-            # Expand BEFORE the guard pass so a guarded lineage member (active turn lease /
-            # compression lock anywhere in it) keeps its selected root listed too.
-            expanded = expand(existing)
-            guard_pool = [*expanded, *_collect_delegate_child_ids(conn, expanded)]
-            if exclude_active_write_guards:
-                # A root is skipped when it or any delegate child it would cascade is guarded, so the
-                # cascade below never deletes a guarded row reported back as kept. When the chain
-                # expansion is on, a guard on ANY lineage member keeps its selected root: deleting
-                # a torn chain would re-surface it (the root re-projects onto a surviving link).
-                # One batched check first; per-root attribution only when something is guarded.
-                active_ids: set = set()
-                if self._guarded_ids(conn, guard_pool):
-                    if include_compression_chain:
-                        for sid in existing:
-                            member_lineage = set(self._expand_compression_lineage(conn, [sid]))
-                            member_lineage.add(sid)
-                            if self._guarded_ids(conn, [*member_lineage,
-                                    *_collect_delegate_child_ids(conn, list(member_lineage))]):
-                                active_ids.add(sid)
-                    else:
-                        active_ids = {
-                            sid for sid in existing
-                            if self._guarded_ids(conn, [*(members := expand([sid])),
-                                                        *_collect_delegate_child_ids(conn, members)])
-                        }
-                existing = [sid for sid in existing if sid not in active_ids]
-                if skipped_ids is not None:
-                    skipped_ids.extend(sorted(active_ids))
-                if not existing:
-                    return 0
-                expanded = expand(existing)
-            from hermes_state_mutation_retirement import retire_sessions
-            retire_sessions(conn, expanded)
-            removed_ids.extend(_delete_delegate_children(conn, expanded))
-            for chunk in _id_chunks(expanded):
-                ph = _session_ids_placeholders(chunk)
-                conn.execute(  # orphan children whose parent is in the kill list (FK)
-                    f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk,
-                )
-                conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
-                conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
-            self._delete_unreferenced_system_prompts(conn)
-            removed_ids.extend(expanded)
-            # Count the ids the CALLER asked for, not the expanded chain links —
-            # the dashboard toast should say "3 deleted" when the user selected
-            # 3 rows, however many physical links those rows had.
-            return len(existing)
+            count, deleted_ids = self._delete_sessions_on_conn(
+                conn, unique_ids, expected_delete_ids=expected_delete_ids,
+                exclude_active_write_guards=exclude_active_write_guards,
+                skipped_ids=skipped_ids, include_compression_chain=include_compression_chain)
+            removed_ids.extend(deleted_ids)
+            return count
         count = self._execute_write(_do)
         if count:
             emit_session_deleted(self, removed_ids, reason="delete", primary=unique_ids[0] if len(unique_ids) == 1 else None,
